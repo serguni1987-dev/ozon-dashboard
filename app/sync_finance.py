@@ -4,6 +4,7 @@ sync_finance.py — синхронизация финансовых начисл
 Идемпотентно: повторный запуск не создаёт дублей.
 """
 import os
+import sys
 import requests
 import sqlite3
 from datetime import datetime, timedelta
@@ -21,6 +22,16 @@ DB = "ozon.db"
 
 START_DEFAULT = "2026-09-01"
 END = datetime.now().strftime("%Y-%m-%d")
+
+# Переопределяется через --from и --to
+def parse_args():
+    args = {"date_from": None, "date_to": None}
+    for arg in sys.argv[1:]:
+        if arg.startswith("--from="):
+            args["date_from"] = arg.split("=", 1)[1]
+        elif arg.startswith("--to="):
+            args["date_to"] = arg.split("=", 1)[1]
+    return args
 
 
 def post(path, body):
@@ -151,6 +162,7 @@ def save_accrual(cur, acc, types):
 
 
 def main():
+    args = parse_args()
     print("=" * 80)
     print("СИНХРОНИЗАЦИЯ ФИНАНСОВ ИЗ OZON API")
     print("=" * 80)
@@ -158,10 +170,16 @@ def main():
     con = sqlite3.connect(DB)
     cur = con.cursor()
 
-    start = get_start_date(cur)
-    print(f"\n[1] Период синхронизации: {start} — {END}")
+    # Период
+    if args["date_from"]:
+        start = args["date_from"]
+    else:
+        start = get_start_date(cur)
+    end = args["date_to"] or END
 
-    if start > END:
+    print(f"\n[1] Период синхронизации: {start} — {end}")
+
+    if start > end:
         print("  Данные уже актуальны.")
         con.close()
         return
@@ -172,13 +190,13 @@ def main():
 
     print(f"\n[3] Тянем по дням...")
     d = datetime.strptime(start, "%Y-%m-%d")
-    end = datetime.strptime(END, "%Y-%m-%d")
+    end_dt = datetime.strptime(end, "%Y-%m-%d")
 
     total_acc = 0
     total_svc = 0
     days_with_data = 0
 
-    while d <= end:
+    while d <= end_dt:
         ds = d.strftime("%Y-%m-%d")
         try:
             rows = fetch_day(ds)
