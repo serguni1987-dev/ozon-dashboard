@@ -1,0 +1,4 @@
+{
+  "code": 7,
+  "message": "i.ReviewCountV2: s.CheckSellerReviewAccess: rpc error: code = PermissionDenied desc = not available with existing subscription"
+}

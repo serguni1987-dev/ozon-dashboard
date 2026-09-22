@@ -1,0 +1,46 @@
+{
+  "result": [
+    {
+      "product_id": 1085357307,
+      "offer_id": "OCE013E4",
+      "updated": true,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "product_id": 725406691,
+      "offer_id": "OCPR0022418030",
+      "updated": true,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "product_id": 1090200743,
+      "offer_id": "OCER002E418030",
+      "updated": true,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "product_id": 1090200749,
+      "offer_id": "OCER005E418030",
+      "updated": true,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "product_id": 1090200550,
+      "offer_id": "OCER013E416030",
+      "updated": true,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "product_id": 1090200652,
+      "offer_id": "OCER013E418030",
+      "updated": true,
+      "errors": [],
+      "warnings": []
+    }
+  ]
+}
