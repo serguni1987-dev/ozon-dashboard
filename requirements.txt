@@ -1,0 +1,6 @@
+﻿python-dotenv
+google-auth
+gspread
+gspread-formatting
+pandas
+requests
