@@ -10,7 +10,7 @@ ozon.db
 app/ozon.db
 
 # === ВЫГРУЗКИ / БЭКАПЫ ===
-downloads/*.xlsx
+downloads/
 app/downloads/*.xlsx
 backups/*.db
 app/backups/
