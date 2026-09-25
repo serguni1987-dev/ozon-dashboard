@@ -612,14 +612,18 @@ def apply_notes(ws):
 
 
 def read_operational(ws):
-    """Читает ручной ввод из строк 34-37. Возвращает dict[addr]=value."""
+    """Читает ручной ввод ТОЛЬКО из колонок C:N (месяцы) строк 37-40.
+    Колонки A (заголовки), B (формула года), O:R (кварталы) НЕ трогает."""
     saved = {}
     for r in (37, 38, 39, 40):
         try:
-            row = ws.row_values(r)
-            for idx, v in enumerate(row):
-                if v and str(v).strip():
-                    saved[f"{col_letter(idx+1)}{r}"] = v
+            row = ws.row_values(r, value_render_option="UNFORMATTED_VALUE")
+            # C..N = 1-based колонки 3..14 = 0-based индексы 2..13
+            for idx in range(2, 14):
+                if idx < len(row):
+                    v = row[idx]
+                    if v is not None and str(v).strip() not in ("", "0"):
+                        saved[f"{col_letter(idx+1)}{r}"] = v
         except Exception:
             pass
     return saved
@@ -630,7 +634,14 @@ def restore_operational(ws, saved):
     if not saved:
         print("[i] Ручных значений не найдено")
         return
-    updates = [{"range": addr, "values": [[val]]} for addr, val in saved.items()]
+    updates = []
+    for addr, val in saved.items():
+        # Пытаемся преобразовать в число
+        try:
+            num = float(str(val).replace(" ", "").replace("\xa0", "").replace(",", "."))
+            updates.append({"range": addr, "values": [[num]]})
+        except (ValueError, AttributeError):
+            updates.append({"range": addr, "values": [[val]]})
     ws.batch_update(updates, value_input_option="USER_ENTERED")
     print(f"[OK] Восстановлено ручных значений: {len(saved)}")
 
@@ -674,8 +685,8 @@ def main():
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title="P&L", rows=100, cols=25)
 
-    ws.clear()
     saved_op = read_operational(ws)
+    ws.clear()
     ws.update(values=rows, range_name="A1", value_input_option="USER_ENTERED")
     restore_operational(ws, saved_op)
     print(f"Записано строк: {len(rows)}")
