@@ -1,39 +1,38 @@
 ﻿"""
-export_all_costs.py — экспорт ВСЕХ своих SKU в CSV для заполнения себестоимости.
-Сортирует по важности: сначала те, что продаются, потом с показами, потом остальные.
-Формат файла — совместим с import_costs.py.
-Плюс отдельный файл со справочной информацией (для приоритизации).
+export_all_costs.py — экспорт ВСЕХ своих SKU в проект/costs_all.csv
+для заполнения себестоимости + справочный файл costs_all_info.csv.
+
+Формат costs_all.csv: offer_id;sku;name;category_l2;cost_price;date_from;comment
+Совместим с import_costs.py (читает date_from, пишет в product_cost_history).
 """
 import csv
 import sqlite3
+import os
 from datetime import datetime, timedelta
 
-DB = "ozon.db"
-SRC = "costs_template.csv"      # берём заголовок отсюда
-OUT_MAIN = "costs_all.csv"      # сюда заполнять себестоимость
-OUT_INFO = "costs_all_info.csv" # справочная информация
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(APP_DIR)
+DB = os.path.join(APP_DIR, "ozon.db")
+OUT_MAIN = os.path.join(PROJECT_DIR, "costs_all.csv")
+OUT_INFO = os.path.join(PROJECT_DIR, "costs_all_info.csv")
+
+HEADER = ["offer_id", "sku", "name", "category_l2",
+          "cost_price", "date_from", "comment"]
 
 
 def main():
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
 
-    # Заголовок берём из существующего шаблона
-    with open(SRC, encoding="utf-8-sig", newline="") as f:
-        reader = csv.reader(f, delimiter=";")
-        header = next(reader)
-    print(f"Заголовок шаблона ({len(header)} колонок): {header}")
-
     max_date = con.execute("SELECT MAX(date) FROM sales_daily").fetchone()[0]
     if max_date:
-        date_from = (datetime.strptime(max_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d")
+        date_from_30d = (datetime.strptime(max_date, "%Y-%m-%d") - timedelta(days=30)).strftime("%Y-%m-%d")
     else:
-        date_from = "1900-01-01"
+        date_from_30d = "1900-01-01"
 
-    # Все свои SKU + агрегаты за 30 дней
     rows = con.execute("""
-        SELECT p.sku, p.offer_id, p.name, p.category_l3, p.brand,
-               p.cost_price,
+        SELECT p.sku, p.offer_id, p.name, p.category_l2,
+               p.cost_price, p.cost_date,
                COALESCE(SUM(sd.revenue), 0)      AS revenue_30d,
                COALESCE(SUM(sd.orders_units), 0) AS orders_30d,
                COALESCE(SUM(sd.views_total), 0)  AS views_30d,
@@ -45,59 +44,50 @@ def main():
         WHERE p.is_own = 1
         GROUP BY p.sku
         ORDER BY revenue_30d DESC, orders_30d DESC, views_30d DESC, p.offer_id
-    """, (date_from, max_date)).fetchall()
+    """, (date_from_30d, max_date)).fetchall()
 
     print(f"Всего своих SKU: {len(rows)}")
-    print(f"Период агрегатов: {date_from} — {max_date}")
+    print(f"Период агрегатов: {date_from_30d} — {max_date}")
 
-    # Как в шаблоне — только offer_id и cost_price (или больше полей — смотрим заголовок)
-    # Пишем ровно тот же формат, что и шаблон
     written = 0
     with open(OUT_MAIN, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow(header)
+        w.writerow(HEADER)
         for r in rows:
-            # Заполняем только те поля, что есть в заголовке шаблона
-            row_dict = {
-                "offer_id": r["offer_id"] or "",
-                "cost_price": r["cost_price"] if r["cost_price"] is not None else "",
-            }
-            # Дополнительные поля — на случай, если шаблон шире
-            for col in header:
-                if col not in row_dict:
-                    row_dict[col] = ""
-            w.writerow([row_dict.get(col, "") for col in header])
+            w.writerow([
+                r["offer_id"] or "",
+                r["sku"],
+                (r["name"] or "")[:200],
+                r["category_l2"] or "",
+                f"{r['cost_price']:.2f}" if r["cost_price"] else "",
+                r["cost_date"] or "2026-01-01",
+                "",
+            ])
             written += 1
 
     print(f"\nЗаписано в {OUT_MAIN}: {written} строк")
 
-    # Справочный файл — чтобы приоритизировать
+    # Справочный файл
     with open(OUT_INFO, "w", encoding="utf-8-sig", newline="") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow([
-            "offer_id", "name", "category_l3", "brand",
-            "cost_price_now",
-            "revenue_30d", "orders_30d", "views_30d", "last_price",
-            "priority"
-        ])
-        for i, r in enumerate(rows, 1):
+        w.writerow(["offer_id", "name", "category_l2",
+                    "cost_price_now", "revenue_30d", "orders_30d",
+                    "views_30d", "last_price", "priority"])
+        for r in rows:
             if r["revenue_30d"] > 0:
-                priority = "1_PRODAETSYA"
+                prio = "1_PRODAETSYA"
             elif r["views_30d"] > 0:
-                priority = "2_EST_POKAZY"
+                prio = "2_EST_POKAZY"
             else:
-                priority = "3_TIHIY"
+                prio = "3_TIHIY"
             w.writerow([
-                r["offer_id"], r["name"], r["category_l3"], r["brand"],
+                r["offer_id"], r["name"], r["category_l2"],
                 r["cost_price"] if r["cost_price"] is not None else "",
                 f"{r['revenue_30d']:.0f}",
-                r["orders_30d"],
-                r["views_30d"],
-                f"{r['last_price']:.0f}",
-                priority,
+                r["orders_30d"], r["views_30d"],
+                f"{r['last_price']:.0f}", prio,
             ])
 
-    # Итоги по приоритетам
     sold = sum(1 for r in rows if r["revenue_30d"] > 0)
     with_views = sum(1 for r in rows if r["views_30d"] > 0 and r["revenue_30d"] == 0)
     silent = sum(1 for r in rows if r["views_30d"] == 0 and r["revenue_30d"] == 0)
@@ -110,8 +100,8 @@ def main():
     print(f"  Уже с себестоимостью:        {has_cost:>5}")
 
     print(f"\nГотово.")
-    print(f"  {OUT_MAIN}  — заполнить cost_price (отсортировано по важности)")
-    print(f"  {OUT_INFO}  — справочная информация (сколько показов, продаж, цена)")
+    print(f"  {OUT_MAIN}  — редактируй тут")
+    print(f"  {OUT_INFO}  — справочно")
 
     con.close()
 

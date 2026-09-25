@@ -107,12 +107,18 @@ def get_pnl_for_month(month):
     if real_skus:
         q = ",".join("?" * len(real_skus))
         for row in con.execute(f"""
-            SELECT p.cost_price, SUM(sd.delivered) AS d
-            FROM sales_daily sd JOIN products p ON p.sku = sd.sku
-            WHERE sd.date >= ? AND sd.date < ? AND p.sku IN ({q})
-            GROUP BY p.sku
-        """, (d1, d2, *real_skus)):
-            cogs += f(row[0]) * f(row[1])
+            SELECT
+                (SELECT cost_price FROM product_cost_history
+                 WHERE sku = sd.sku AND date_from < ?
+                 ORDER BY date_from DESC LIMIT 1) AS cost_price,
+                SUM(sd.delivered) AS d
+            FROM sales_daily sd
+            WHERE sd.date >= ? AND sd.date < ? AND sd.sku IN ({q})
+            GROUP BY sd.sku
+        """, (d2, d1, d2, *real_skus)):
+            cost = f(row[0]) if row[0] is not None else 0
+            if cost > 0:
+                cogs += cost * f(row[1])
 
     # Fallback: если sales_daily пусто (янв-май) — через accruals POSTING
     if cogs == 0:
@@ -136,8 +142,12 @@ def get_pnl_for_month(month):
             units = int(row[1] or 0)
             if units == 0:
                 continue
-            r = con.execute("SELECT cost_price FROM products WHERE sku = ?", (sku,)).fetchone()
-            cost = f(r[0]) if r else 0
+            r = con.execute("""
+                SELECT cost_price FROM product_cost_history
+                WHERE sku = ? AND date_from < ?
+                ORDER BY date_from DESC LIMIT 1
+            """, (sku, d2)).fetchone()
+            cost = f(r[0]) if r and r[0] else 0
             if cost > 0:
                 cogs += units * cost
 

@@ -30,3 +30,6 @@ env/
 .DS_Store
 Thumbs.db
 app_backup_*/
+
+costs_all.csv
+costs_all_info.csv
