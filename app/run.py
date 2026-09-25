@@ -83,6 +83,10 @@ def main():
     else:
         print("\n[1] Новых .xlsx нет. Использую текущие данные.")
 
+    # 2.5. Отчёт о реализации за прошлый месяц (с защитой от перезаписи)
+    print("\n[2.5] Отчёт о реализации за прошлый месяц...")
+    run([PY, "sync_monthly.py"], stop_on_error=False)
+
     # 3. Финансы из API
     print("\n[3] Синхронизация финансов из Ozon API...")
     run([PY, "sync_finance.py"], stop_on_error=False)
