@@ -152,7 +152,7 @@ def save_accrual(cur, acc, types):
                 if tid is None or amt is None:
                     continue
                 cur.execute("""
-                    INSERT INTO accruals_services
+                    INSERT OR IGNORE INTO accruals_services
                     (accrual_id, date, sku, type_id, type_name, amount)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (accrual_id, date_str, sku, tid,
@@ -166,7 +166,7 @@ def save_accrual(cur, acc, types):
         amt = to_float(non_item.get("accrued"))
         if tid is not None and amt is not None:
             cur.execute("""
-                INSERT INTO accruals_services
+                INSERT OR IGNORE INTO accruals_services
                 (accrual_id, date, sku, type_id, type_name, amount)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (accrual_id, date_str, None, tid,
@@ -186,7 +186,7 @@ def save_accrual(cur, acc, types):
                 if tid is None or amt is None:
                     continue
                 cur.execute("""
-                    INSERT INTO accruals_services
+                    INSERT OR IGNORE INTO accruals_services
                     (accrual_id, date, sku, type_id, type_name, amount)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (accrual_id, date_str, sku, tid,
@@ -202,7 +202,7 @@ def save_accrual(cur, acc, types):
             amt = to_float(fee.get("accrued"))
             if tid is not None and amt is not None:
                 cur.execute("""
-                    INSERT INTO accruals_services
+                    INSERT OR IGNORE INTO accruals_services
                     (accrual_id, date, sku, type_id, type_name, amount)
                     VALUES (?, ?, ?, ?, ?, ?)
                 """, (accrual_id, date_str, None, tid,

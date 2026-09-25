@@ -20,8 +20,9 @@ SHEET_ID = re.search(r'SHEET_ID\s*=\s*"([^"]+)"', _sync).group(1)
 CATEGORY_MAP = {
     # фулфилмент
     32: "Логистика",  77: "Логистика",
-    59: "Обратная логистика", 71: "Обратная логистика", 45: "Обратная логистика",
+    59: "Логистика", 71: "Услуги FBO", 45: "Обратная логистика",
     29: "Последняя миля", 98: "Последняя миля",
+    25: "ItemCompensation",
     12: "Обработка, сборка", 16: "Обработка, сборка", 38: "Обработка, сборка",
     39: "Обработка, сборка", 78: "Обработка, сборка", 79: "Обработка, сборка",
     # маркетинг — РАСШИРЕНО
@@ -131,8 +132,9 @@ def get_pnl_for_month(month):
 
     revenue = sale_price + bonus + coinv
     ads = cats.get("Реклама", 0)
-    services_no_ads = sum(v for k, v in cats.items() if k != "Реклама")
-    expenses_no_ads = commission + services_no_ads
+    services_no_ads = sum(v for k, v in cats.items()
+                       if k not in ("Реклама", "ItemCompensation"))
+    expenses_no_ads = commission + services_no_ads - cats.get("ItemCompensation", 0)
     margin = revenue - expenses_no_ads - ads - cogs
     tax_base = revenue - bonus
     tax = tax_base * TAX_RATE
