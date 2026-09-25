@@ -48,3 +48,8 @@ PNL/__pycache__/
 ../app_backup_*/
 ozon_backup_*.db
 peek_august_raw.json
+
+costs_all.csv
+costs_all_info.csv
+costs_missing.csv
+pnl_*.csv

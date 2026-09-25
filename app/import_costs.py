@@ -1,4 +1,4 @@
-"""
+﻿"""
 import_costs.py
 Читает costs_template.csv (заполненный тобой) и сохраняет себестоимость в SQLite.
 Добавляет колонку cost_price в products.
@@ -8,7 +8,7 @@ import sqlite3
 import os
 
 DB = "ozon.db"
-CSV = "costs_template.csv"
+CSV = "costs_all.csv"
 
 
 def main():

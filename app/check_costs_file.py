@@ -1,91 +1,55 @@
-﻿"""
-check_costs_file.py - что в costs_all.csv и каких SKU не хватает.
-"""
+﻿"""check_costs_file.py — что в costs_all.csv, есть ли там 16 SKU."""
 import csv
-import sqlite3
-import os
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-DB = os.path.join(APP_DIR, "ozon.db")
-CSV = "costs_all.csv"
+CSV = r"C:\Users\sergu\Desktop\проект\Себестоимость\costs_all.csv"
 
-if not os.path.exists(CSV):
-    print(f"[ERROR] Файл {CSV} не найден")
-    raise SystemExit
+# Пробуем разные кодировки
+for enc in ("utf-8-sig", "utf-8", "cp1251"):
+    try:
+        with open(CSV, encoding=enc, newline="") as f:
+            rows = list(csv.reader(f, delimiter="\t"))
+        print(f"[OK] Кодировка: {enc}")
+        print(f"     Строк: {len(rows)}")
+        break
+    except Exception as e:
+        print(f"[!] {enc}: {e}")
 
-# Читаем CSV
-with open(CSV, encoding="utf-8-sig", newline="") as f:
-    reader = csv.DictReader(f, delimiter=";")
-    rows = list(reader)
+header = rows[0]
+print(f"\nКолонки: {header}")
+print(f"\nПервые 3 строки:")
+for r in rows[1:4]:
+    print(f"  {r}")
 
-print("=" * 80)
-print(f"ФАЙЛ {CSV}")
-print("=" * 80)
-print(f"\nСтрок: {len(rows)}")
-print(f"Колонки: {list(rows[0].keys())}")
+# Индексы колонок
+col_sku = header.index("SKU") if "SKU" in header else 1
+col_offer = header.index("Артикул") if "Артикул" in header else 0
+col_cost = header.index("Себестоимость") if "Себестоимость" in header else 4
 
-# Какие offer_id в файле
-file_offers = {}
-for r in rows:
-    oid = (r.get("offer_id") or "").strip()
-    cost = (r.get("cost_price") or "").strip()
-    if oid:
-        file_offers[oid] = cost
+# Собираем все SKU из файла
+skus_in_file = set()
+for r in rows[1:]:
+    if len(r) > col_sku:
+        try:
+            skus_in_file.add(int(r[col_sku]))
+        except (ValueError, IndexError):
+            pass
+print(f"\nSKU в файле: {len(skus_in_file)}")
 
-filled = sum(1 for c in file_offers.values() if c and c != "0")
-print(f"\nУникальных offer_id: {len(file_offers)}")
-print(f"С заполненной себестоимостью: {filled}")
-print(f"Без себестоимости: {len(file_offers) - filled}")
+# Наши 16
+missing_16 = [1879636339, 1281819166, 2288681486, 1591552350, 1609915178,
+              2288693078, 1281720312, 1879635959, 1879635938, 1598572996,
+              1879636428, 1267412652, 1616350111, 1331069847, 1610041376, 1609915213]
 
-# Какие offer_id в БД (все свои)
-con = sqlite3.connect(DB)
-con.row_factory = sqlite3.Row
+print(f"\n=== Проверка 16 SKU в costs_all.csv ===")
+found = 0
+for sku in missing_16:
+    match = [r for r in rows[1:] if len(r) > col_sku and r[col_sku].strip() == str(sku)]
+    if match:
+        found += 1
+        r = match[0]
+        cost = r[col_cost] if len(r) > col_cost else "?"
+        print(f"  {sku:>12} ✓  {r[col_offer]:<25} cost={cost}")
+    else:
+        print(f"  {sku:>12} ✗  НЕ НАЙДЕН в файле")
 
-db_offers = [r[0] for r in con.execute("""
-    SELECT offer_id FROM products
-    WHERE is_own = 1 AND offer_id IS NOT NULL AND offer_id != ''
-""")]
-print(f"\nСвоих offer_id в БД: {len(db_offers)}")
-
-# Которых нет в файле
-missing = [oid for oid in db_offers if oid not in file_offers]
-print(f"\nНЕТ в файле: {len(missing)}")
-for oid in missing[:30]:
-    row = con.execute(
-        "SELECT name, cost_price FROM products WHERE offer_id = ?", (oid,)
-    ).fetchone()
-    name = (row["name"] or "")[:60] if row else ""
-    cost = row["cost_price"] if row else None
-    print(f"  {oid:<25} cost={cost}  {name}")
-
-if len(missing) > 30:
-    print(f"  ... и ещё {len(missing) - 30}")
-
-# Какие SKU в realization за янв-авг, которых нет в файле
-print(f"\n" + "=" * 80)
-print("SKU ИЗ REALIZATION (янв-авг), КОТОРЫХ НЕТ В ФАЙЛЕ:")
-print("=" * 80)
-
-real_skus = [r[0] for r in con.execute("""
-    SELECT DISTINCT r.sku, p.offer_id
-    FROM monthly_realization_rows r
-    LEFT JOIN products p ON p.sku = r.sku
-    WHERE r.month < '2026-09'
-""")]
-
-missing_real = []
-for r in con.execute("""
-    SELECT DISTINCT r.sku, p.offer_id, p.name
-    FROM monthly_realization_rows r
-    LEFT JOIN products p ON p.sku = r.sku
-    WHERE r.month < '2026-09'
-"""):
-    if r["offer_id"] and r["offer_id"] not in file_offers:
-        missing_real.append(r)
-
-print(f"\nНайдено: {len(missing_real)}")
-for r in missing_real[:30]:
-    name = (r["name"] or "")[:50]
-    print(f"  {r['sku']:<15} {r['offer_id']:<25} {name}")
-
-con.close()
+print(f"\nНайдено в файле: {found} из {len(missing_16)}")

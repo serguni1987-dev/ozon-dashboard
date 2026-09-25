@@ -23,7 +23,7 @@ CATEGORY_MAP = {
     59: "Логистика", 71: "Услуги FBO", 45: "Обратная логистика",
     29: "Последняя миля", 98: "Последняя миля",
     25: "ItemCompensation",
-    12: "Обработка, сборка", 16: "Обработка, сборка", 38: "Обработка, сборка",
+    12: "Услуги FBO", 16: "Логистика", 38: "Обработка, сборка",
     39: "Обработка, сборка", 78: "Обработка, сборка", 79: "Обработка, сборка",
     # маркетинг — РАСШИРЕНО
     41: "Реклама PPC",        # PayPerClick
@@ -99,6 +99,8 @@ def get_pnl_for_month(month):
 
     # Себестоимость: delivered × cost по SKU из realization
     cogs = 0.0
+
+    # Основной путь: sales_daily (есть с июня)
     real_skus = [r[0] for r in con.execute(
         "SELECT DISTINCT sku FROM monthly_realization_rows WHERE month = ?", (month,)
     )]
@@ -111,21 +113,32 @@ def get_pnl_for_month(month):
             GROUP BY p.sku
         """, (d1, d2, *real_skus)):
             cogs += f(row[0]) * f(row[1])
-    else:
-        # Fallback: unit_number × cost для месяцев без sales_daily
+
+    # Fallback: если sales_daily пусто (янв-май) — через accruals POSTING
+    if cogs == 0:
+        # Fallback: каждый unit_number — +1 если продажа, -1 если возврат
         for row in con.execute("""
-            SELECT a.sku, COUNT(DISTINCT a.unit_number) AS units, p.cost_price
-            FROM accruals a
-            LEFT JOIN products p ON p.sku = a.sku
-            WHERE a.date >= ? AND a.date < ?
-              AND a.accrued_category = 'POSTING'
-              AND a.seller_price IS NOT NULL
-              AND a.sku IS NOT NULL
-            GROUP BY a.sku
+            SELECT sku, SUM(sign) AS units
+            FROM (
+                SELECT DISTINCT a.sku, a.unit_number,
+                       CASE WHEN a.seller_price > 0 THEN 1
+                            WHEN a.seller_price < 0 THEN -1
+                            ELSE 0 END AS sign
+                FROM accruals a
+                WHERE a.date >= ? AND a.date < ?
+                  AND a.accrued_category = 'POSTING'
+                  AND a.seller_price IS NOT NULL
+                  AND a.sku IS NOT NULL
+            )
+            GROUP BY sku
         """, (d1, d2)):
+            sku = row[0]
             units = int(row[1] or 0)
-            cost = f(row[2])
-            if units > 0 and cost > 0:
+            if units == 0:
+                continue
+            r = con.execute("SELECT cost_price FROM products WHERE sku = ?", (sku,)).fetchone()
+            cost = f(r[0]) if r else 0
+            if cost > 0:
                 cogs += units * cost
 
     con.close()
