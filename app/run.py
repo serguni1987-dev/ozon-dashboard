@@ -102,21 +102,29 @@ def main():
     else:
         print("\n[6] Архив не синхронизирую (используй --archive раз в неделю)")
 
-    # 7. Решения из Google Sheets
-    print("\n[7] Синхронизация решений из Google Sheets...")
+    # 7. Помечаем свои/чужие (SKU из отчёта реализации → is_own=1)
+    print("\n[7] Помечаю свои SKU...")
+    run([PY, "mark_brands.py"], stop_on_error=False)
+
+    # 8. Контроль себестоимости (алерт, не блокирующий)
+    print("\n[8] Проверка себестоимости...")
+    run([PY, "check_costs_alert.py"], stop_on_error=False)
+
+    # 9. Решения из Google Sheets
+    print("\n[9] Синхронизация решений из Google Sheets...")
     run([PY, "sync_decisions.py"], stop_on_error=False)
 
-    # 8. Google Sheets
-    print("\n[8] Выгружаю в Google Sheets...")
+    # 10. Google Sheets
+    print("\n[10] Выгружаю в Google Sheets...")
     run([PY, "sheets_sync.py"], stop_on_error=False)
 
-    # 9. Локальный пульт
-    print("\n[9] Открываю пульт...")
+    # 11. Локальный пульт
+    print("\n[11] Открываю пульт...")
     run([PY, "daily_dashboard.py"])
 
-    # 10. Дневник решений
+    # 12. Дневник решений
     if not skip_effects:
-        print("\n[10] Дневник решений...")
+        print("\n[12] Дневник решений...")
         run([PY, "decision_effects.py"], stop_on_error=False)
 
     # 11. Резервная копия
