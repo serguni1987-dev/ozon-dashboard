@@ -56,3 +56,7 @@ pnl_*.csv
 
 PNL/_diag/__pycache__/
 PNL/_archive/__pycache__/
+
+Себестоимость/__pycache__/
+Себестоимость/_diag/__pycache__/
+Себестоимость/_archive/__pycache__/
