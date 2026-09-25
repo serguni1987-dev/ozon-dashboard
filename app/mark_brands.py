@@ -11,6 +11,8 @@ DB_PATH = "ozon.db"
 OWN_BRANDS = [
     'VIVA - HOME TEXTILE',
     'VIVA HOME TEXTILE',
+    'VIVA-HOME TEXTILE',
+    'VIVA-HOME-TEXTILE',
 ]
 
 
@@ -33,6 +35,25 @@ def main():
         f"UPDATE products SET is_own = 1 WHERE brand IN ({placeholders})",
         OWN_BRANDS,
     )
+    conn.commit()
+
+    # ── ПРАВИЛО 2: все SKU из отчёта реализации → свои ──
+    conn.execute("""
+        UPDATE products
+        SET is_own = 1
+        WHERE sku IN (
+            SELECT DISTINCT sku FROM monthly_realization_rows
+            WHERE sku IS NOT NULL
+        )
+    """)
+    conn.commit()
+
+    # ── ПРАВИЛО 3: SKU со is_own=1 и brand=NULL → ставим VIVA ──
+    conn.execute("""
+        UPDATE products
+        SET brand = 'VIVA - HOME TEXTILE'
+        WHERE brand IS NULL AND is_own = 1
+    """)
     conn.commit()
 
     # Отчёт
