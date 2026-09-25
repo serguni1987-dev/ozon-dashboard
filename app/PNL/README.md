@@ -146,3 +146,26 @@ VPN не работает. Google API недоступен из РФ без VPN.
 - Рабочий ПК: `C:\Users\PTO\Проект\ozon-dashboard\app\PNL\`
 - Ноутбук: `C:\Users\sergu\Desktop\проект\app\PNL\`
 - GitHub: https://github.com/serguni1987-dev/ozon-dashboard
+
+---
+
+## Структура папки PNL
+
+- **Ядро** (3): `sync_pnl.py`, `pnl_format.py`, `fix_sheet_full.py`
+- **`_diag/`** — диагностика P&L (36 файлов)
+- **`_archive/`** — одноразовые патчи (51 файл), уже применены
+
+### Запуск диагностики
+
+Из папки `app/`:
+
+    py PNL\_diag\check_all_cogs.py
+    py PNL\_diag\compare_ozon.py
+
+### Что НЕ переносить из app/
+
+- `mark_brands.py`, `check_costs_alert.py` — вызываются из `run.py`
+- `run_pnl.bat` — вызывается из корня `app\`
+- `import_costs.py`, `export_all_costs.py` — про себестоимость, влияет на ЦЕНЫ
+- `sync_finance.py`, `sync_monthly.py`, `sheets_sync.py`, `run.py` — общие
+- `sync_fact.py`, `calc_fact_exact.py`, `read_fact.py` — лист ФАКТ

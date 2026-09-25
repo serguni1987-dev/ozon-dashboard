@@ -53,3 +53,6 @@ costs_all.csv
 costs_all_info.csv
 costs_missing.csv
 pnl_*.csv
+
+PNL/_diag/__pycache__/
+PNL/_archive/__pycache__/
