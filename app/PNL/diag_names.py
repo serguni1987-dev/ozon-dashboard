@@ -1,5 +1,5 @@
 import os, sqlite3
-con = sqlite3.connect("ozon.db")
+con = sqlite3.connect(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ozon.db"))
 con.row_factory = sqlite3.Row
 
 print("=== type_id + type_name за 2026 ===")

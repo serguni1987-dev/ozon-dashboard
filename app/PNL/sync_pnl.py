@@ -9,7 +9,7 @@ import gspread
 from datetime import datetime
 from google.oauth2.service_account import Credentials
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB = os.path.join(APP_DIR, "ozon.db")
 CREDENTIALS = os.path.join(APP_DIR, "credentials.json")
 TAX_RATE = 0.15

@@ -1,9 +1,12 @@
 ﻿# fix_sheet_full.py — живые формулы в B, C:N, O:R (50 строк).
 import os, gspread
 from google.oauth2.service_account import Credentials
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import sync_pnl
 
-CRED=os.path.join(os.path.dirname(os.path.abspath(__file__)),"credentials.json")
+CRED=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),"credentials.json")
 SCOPES=["https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"]
 creds=Credentials.from_service_account_file(CRED,scopes=SCOPES)

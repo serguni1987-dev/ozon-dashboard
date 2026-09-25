@@ -94,11 +94,22 @@ def main():
     print("ЗАГРУЗКА ОТЧЁТА О РЕАЛИЗАЦИИ ИЗ OZON API")
     print("=" * 80)
 
-    today = date.today()
-    prev = today - relativedelta(months=1)
-    month = prev.month
-    year = prev.year
-    month_str = f"{year}-{month:02d}"
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--month", default=None, help="YYYY-MM")
+    args, _ = parser.parse_known_args()
+
+    if args.month:
+        parts = args.month.split("-")
+        year = int(parts[0])
+        month = int(parts[1])
+        month_str = args.month
+    else:
+        today = date.today()
+        prev = today - relativedelta(months=1)
+        month = prev.month
+        year = prev.year
+        month_str = f"{year}-{month:02d}"
 
     print(f"\n[1] Запрашиваем отчёт за: {month_str}")
 
@@ -168,6 +179,7 @@ def main():
         dc_stars = to_float(dc.get("stars"))
 
         # return_commission
+        rc_amount = to_float(rc.get("amount"))
         rc_bonus = to_float(rc.get("bonus"))
         rc_std_fee = to_float(rc.get("standard_fee"))
         rc_total = to_float(rc.get("total"))
@@ -176,16 +188,16 @@ def main():
         rc_pickup_ci = to_float(rc.get("pick_up_point_coinvestment"))
         rc_stars = to_float(rc.get("stars"))
 
-        # Итого по строке
+        # Итого по строке — delivery МИНУС return
         total_seller_price = seller_price * dc_qty
-        total_sale_price = dc_amount
-        total_bonus = dc_bonus + rc_bonus
-        total_coinv = dc_bank_ci + dc_pickup_ci + rc_bank_ci + rc_pickup_ci
-        total_gross_fee = dc_std_fee + rc_std_fee
-        total_held = dc_total + rc_total
+        total_sale_price = dc_amount - rc_amount
+        total_bonus = dc_bonus - rc_bonus
+        total_coinv = (dc_bank_ci + dc_pickup_ci) - (rc_bank_ci + rc_pickup_ci)
+        total_gross_fee = dc_std_fee - rc_std_fee
+        total_held = dc_total - rc_total
         total_logistics = total_held - total_gross_fee
         total_eff = total_held - total_bonus - total_coinv
-        total_stars = dc_stars + rc_stars
+        total_stars = dc_stars - rc_stars
 
         seller_price_sum += total_seller_price
         sale_price_sum += total_sale_price

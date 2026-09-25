@@ -1,6 +1,6 @@
 import os, sqlite3
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 con = sqlite3.connect(os.path.join(APP_DIR, "ozon.db"))
 con.row_factory = sqlite3.Row
 

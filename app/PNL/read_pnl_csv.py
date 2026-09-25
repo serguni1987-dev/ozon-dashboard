@@ -1,7 +1,7 @@
 ﻿import csv
 import os
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CSV = os.path.join(APP_DIR, "pnl_2026.csv")
 
 with open(CSV, encoding="utf-8-sig", newline="") as f:

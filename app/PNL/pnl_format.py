@@ -1,9 +1,12 @@
 ﻿# pnl_format.py — оформление листа P&L (50 строк). Значения не трогает.
 import os, gspread
 from google.oauth2.service_account import Credentials
+import sys as _sys
+import os as _os
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import sync_pnl
 
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRED = os.path.join(APP_DIR, "credentials.json")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets",
           "https://www.googleapis.com/auth/drive"]
@@ -83,7 +86,11 @@ def build_requests(sid, net_val):
             "cell":{"userEnteredFormat":cell(bg=WHITE,fg=GREY_TXT,italic=True,size=10)},
             "fields":"userEnteredFormat"}})
     # справочные + хвост
-    for r in (3,4,5,6,47,48):
+    for r in (3,4,5,6):
+        reqs.append({"repeatCell":{"range":grid(sid,r-1,r),
+            "cell":{"userEnteredFormat":cell(bg=WHITE,fg=BLACK,italic=False,size=11)},
+            "fields":"userEnteredFormat"}})
+    for r in (47,48):
         reqs.append({"repeatCell":{"range":grid(sid,r-1,r),
             "cell":{"userEnteredFormat":cell(bg=WHITE,fg=GREY_TXT,italic=True,size=10)},
             "fields":"userEnteredFormat"}})
