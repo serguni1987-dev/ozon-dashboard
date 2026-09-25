@@ -1,10 +1,8 @@
 ﻿"""
-import_costs.py
-Читает проект/costs_all.csv и сохраняет себестоимость в SQLite + историю.
-Формат CSV: offer_id;sku;name;category_l2;cost_price;date_from;comment
-- Если date_from пусто → сегодняшняя дата
-- Если цена новая (отличается от последней в истории) → новая запись в product_cost_history
-- Всегда обновляет products.cost_price на актуальную
+import_costs.py — читает проект/costs_all.csv.
+Формат: offer_id;sku;name;category_l2;cost_price;date_from;cost_price_new;date_from_new
+Применяет ТОЛЬКО колонки 7-8 (новая цена): если заполнены →
+добавляет в product_cost_history + обновляет products.
 """
 import csv
 import sqlite3
@@ -17,6 +15,31 @@ DB = os.path.join(APP_DIR, "ozon.db")
 CSV = os.path.join(PROJECT_DIR, "costs_all.csv")
 
 
+def parse_date(s):
+    """Принимает '2026-01-01' и '01.01.2026'."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    if "-" in s:
+        return s
+    if "." in s:
+        parts = s.split(".")
+        if len(parts) == 3:
+            d, m, y = parts
+            return f"{y}-{m}-{d}"
+    return None
+
+
+def parse_cost(s):
+    s = (s or "").strip().replace(" ", "").replace("\u00a0", "").replace(",", ".")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
 def main():
     if not os.path.exists(CSV):
         print(f"[ERROR] {CSV} не найден")
@@ -24,94 +47,83 @@ def main():
 
     conn = sqlite3.connect(DB)
     conn.row_factory = sqlite3.Row
-
-    # Создаём таблицу истории, если её нет
     conn.execute("""
         CREATE TABLE IF NOT EXISTS product_cost_history (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            sku         INTEGER NOT NULL,
-            date_from   TEXT NOT NULL,
-            cost_price  REAL NOT NULL,
-            source      TEXT DEFAULT 'manual',
-            created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sku INTEGER NOT NULL,
+            date_from TEXT NOT NULL,
+            cost_price REAL NOT NULL,
+            source TEXT DEFAULT 'manual',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(sku, date_from)
         )
     """)
     conn.commit()
 
     today = date.today().isoformat()
+    updated = 0
+    new_history = 0
+    skipped = 0
+    not_found = 0
 
-    updated = 0          # обновили products.cost_price
-    new_history = 0      # добавили запись в историю
-    skipped = 0          # пустой cost_price или ошибка парсинга
-    not_found = 0        # offer_id нет в products
-
-    with open(CSV, "r", encoding="utf-8-sig") as f:
+    with open(CSV, encoding="utf-8-sig", newline="") as f:
         reader = csv.DictReader(f, delimiter=";")
         for row in reader:
             offer_id = (row.get("offer_id") or "").strip()
-            cost_raw = (row.get("cost_price") or "").strip()
-            date_from = (row.get("date_from") or "").strip() or today
-
-            if not offer_id or not cost_raw:
+            if not offer_id:
                 skipped += 1
                 continue
 
-            # Парсим цену
-            cost_str = cost_raw.replace(" ", "").replace("\u00a0", "").replace(",", ".")
-            try:
-                cost = float(cost_str)
-            except ValueError:
-                print(f"[WARN] Не парсится себестоимость у {offer_id}: '{cost_raw}'")
+            # Только новая цена
+            new_cost_raw = (row.get("cost_price_new") or "").strip()
+            new_date_raw = (row.get("date_from_new") or "").strip()
+
+            if not new_cost_raw:
+                continue
+
+            cost = parse_cost(new_cost_raw)
+            if cost is None:
+                print(f"[WARN] Не парсится цена у {offer_id}: '{new_cost_raw}'")
                 skipped += 1
                 continue
 
-            # Найти sku в products
-            r = conn.execute("SELECT sku, cost_price FROM products WHERE offer_id = ?",
+            date_from = parse_date(new_date_raw) or today
+
+            r = conn.execute("SELECT sku FROM products WHERE offer_id = ?",
                              (offer_id,)).fetchone()
             if not r:
                 not_found += 1
                 continue
             sku = r["sku"]
-            old_cost = r["cost_price"]
 
-            # Обновить products.cost_price
             conn.execute("UPDATE products SET cost_price = ?, cost_date = ? WHERE sku = ?",
                          (cost, date_from, sku))
             updated += 1
 
-            # История: добавить, если такого date_from+sku нет, или цена изменилась
-            existing = conn.execute("""
-                SELECT cost_price FROM product_cost_history
-                WHERE sku = ? AND date_from = ?
-            """, (sku, date_from)).fetchone()
-
-            if not existing:
-                conn.execute("""
-                    INSERT INTO product_cost_history (sku, date_from, cost_price, source)
-                    VALUES (?, ?, ?, 'import')
-                """, (sku, date_from, cost))
-                new_history += 1
+            conn.execute("""
+                INSERT OR REPLACE INTO product_cost_history
+                    (sku, date_from, cost_price, source)
+                VALUES (?, ?, ?, 'import')
+            """, (sku, date_from, cost))
+            new_history += 1
 
     conn.commit()
 
-    # ── Отчёт ──
     print(f"\n[OK] Обновлено products: {updated}")
     print(f"[OK] Добавлено в историю: {new_history}")
-    print(f"[SKIP] Пропущено (пусто/ошибка): {skipped}")
+    print(f"[SKIP] Пропущено: {skipped}")
     if not_found:
-        print(f"[WARN] offer_id не найден в products: {not_found}")
+        print(f"[WARN] offer_id не найден: {not_found}")
 
     n_own = conn.execute("SELECT COUNT(*) FROM products WHERE is_own=1").fetchone()[0]
     n_cost = conn.execute("""
-        SELECT COUNT(*) FROM products WHERE is_own=1 AND cost_price IS NOT NULL AND cost_price > 0
+        SELECT COUNT(*) FROM products WHERE is_own=1 AND cost_price > 0
     """).fetchone()[0]
-    print(f"\n[OK] Себестоимость у {n_cost} из {n_own} своих SKU")
+    print(f"\n[OK] Себестоимость у {n_cost} из {n_own} SKU")
 
     n_hist = conn.execute("SELECT COUNT(*) FROM product_cost_history").fetchone()[0]
     print(f"[OK] Всего записей в истории: {n_hist}")
 
-    # Историю по датам
     print("\nИстория по датам:")
     for r in conn.execute("""
         SELECT date_from, source, COUNT(*) AS n
@@ -121,19 +133,6 @@ def main():
         LIMIT 10
     """):
         print(f"  {r['date_from']}  {r['source']:<12}  {r['n']} SKU")
-
-    # Топ-5 активных
-    print("\nТоп-5 активных SKU:")
-    for r in conn.execute("""
-        SELECT p.offer_id, p.cost_price, SUM(s.revenue) AS rev
-        FROM sales_daily s
-        JOIN products p ON p.sku = s.sku
-        WHERE p.is_own=1 AND p.cost_price > 0
-        GROUP BY s.sku
-        ORDER BY rev DESC
-        LIMIT 5
-    """):
-        print(f"  {r['offer_id']:20s}  себест. {r['cost_price']:>8.0f} ₽,  выручка {r['rev']:>9.0f} ₽")
 
     conn.close()
 

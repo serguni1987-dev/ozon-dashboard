@@ -169,3 +169,32 @@ VPN не работает. Google API недоступен из РФ без VPN.
 - `import_costs.py`, `export_all_costs.py` — про себестоимость, влияет на ЦЕНЫ
 - `sync_finance.py`, `sync_monthly.py`, `sheets_sync.py`, `run.py` — общие
 - `sync_fact.py`, `calc_fact_exact.py`, `read_fact.py` — лист ФАКТ
+
+---
+
+## Себестоимость
+
+### Файл
+`проект/costs_all.csv` — редактируй тут (Excel, разделитель `;`, UTF-8).
+
+### Формат
+offer_id;sku;name;category_l2;cost_price;date_from;comment
+- `cost_price` — пусто, если цены нет (SKU не влияет на P&L)
+- `date_from` — `YYYY-MM-DD`, дата начала действия. Пусто → сегодня.
+
+### История цен
+Таблица `product_cost_history(sku, date_from, cost_price, source, created_at)`.
+
+P&L берёт цену на конец месяца через `date_from < конец_месяца`.
+
+### Workflow
+1. `py export_all_costs.py` — выгрузить все SKU в `проект/costs_all.csv`
+2. Заполнить `cost_price` в Excel
+3. `py import_costs.py` — залить в БД + историю
+
+### Скрипты
+- `import_costs.py` — Excel → БД (products + history)
+- `export_all_costs.py` — БД → Excel
+- `create_cost_history.py` — однократно создал таблицу
+- `migrate_costs_csv.py` — однократно перенёс старый CSV
+

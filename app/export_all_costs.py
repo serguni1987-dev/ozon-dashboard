@@ -1,9 +1,8 @@
 ﻿"""
-export_all_costs.py — экспорт ВСЕХ своих SKU в проект/costs_all.csv
-для заполнения себестоимости + справочный файл costs_all_info.csv.
-
-Формат costs_all.csv: offer_id;sku;name;category_l2;cost_price;date_from;comment
-Совместим с import_costs.py (читает date_from, пишет в product_cost_history).
+export_all_costs.py — выгружает все свои SKU в проект/costs_all.csv.
+Формат: offer_id;sku;name;category_l2;cost_price;date_from;cost_price_new;date_from_new
+Колонки 5-6 (cost_price, date_from) — текущая цена (справочно).
+Колонки 7-8 (cost_price_new, date_from_new) — для НОВОЙ цены (заполни, если хочешь изменить).
 """
 import csv
 import sqlite3
@@ -17,7 +16,7 @@ OUT_MAIN = os.path.join(PROJECT_DIR, "costs_all.csv")
 OUT_INFO = os.path.join(PROJECT_DIR, "costs_all_info.csv")
 
 HEADER = ["offer_id", "sku", "name", "category_l2",
-          "cost_price", "date_from", "comment"]
+          "cost_price", "date_from", "cost_price_new", "date_from_new"]
 
 
 def main():
@@ -31,12 +30,17 @@ def main():
         date_from_30d = "1900-01-01"
 
     rows = con.execute("""
-        SELECT p.sku, p.offer_id, p.name, p.category_l2,
-               p.cost_price, p.cost_date,
-               COALESCE(SUM(sd.revenue), 0)      AS revenue_30d,
-               COALESCE(SUM(sd.orders_units), 0) AS orders_30d,
-               COALESCE(SUM(sd.views_total), 0)  AS views_30d,
-               COALESCE(MAX(sd.avg_price), 0)    AS last_price
+        SELECT
+            p.sku, p.offer_id, p.name, p.category_l2,
+            p.cost_price AS products_cost, p.cost_date AS products_date,
+            (SELECT cost_price FROM product_cost_history
+             WHERE sku = p.sku ORDER BY date_from DESC LIMIT 1) AS last_price,
+            (SELECT date_from FROM product_cost_history
+             WHERE sku = p.sku ORDER BY date_from DESC LIMIT 1) AS last_date,
+            COALESCE(SUM(sd.revenue), 0)      AS revenue_30d,
+            COALESCE(SUM(sd.orders_units), 0) AS orders_30d,
+            COALESCE(SUM(sd.views_total), 0)  AS views_30d,
+            COALESCE(MAX(sd.avg_price), 0)    AS last_sale_price
         FROM products p
         LEFT JOIN sales_daily sd
                ON sd.sku = p.sku
@@ -54,14 +58,17 @@ def main():
         w = csv.writer(f, delimiter=";")
         w.writerow(HEADER)
         for r in rows:
+            cost = r["last_price"] if r["last_price"] else r["products_cost"]
+            dt = r["last_date"] if r["last_date"] else (r["products_date"] or "2026-01-01")
             w.writerow([
                 r["offer_id"] or "",
                 r["sku"],
                 (r["name"] or "")[:200],
                 r["category_l2"] or "",
-                f"{r['cost_price']:.2f}" if r["cost_price"] else "",
-                r["cost_date"] or "2026-01-01",
-                "",
+                f"{cost:.2f}" if cost else "",
+                dt,
+                "",   # cost_price_new — ЗАПОЛНИ, если хочешь изменить
+                "",   # date_from_new — ЗАПОЛНИ дату начала действия
             ])
             written += 1
 
@@ -82,26 +89,22 @@ def main():
                 prio = "3_TIHIY"
             w.writerow([
                 r["offer_id"], r["name"], r["category_l2"],
-                r["cost_price"] if r["cost_price"] is not None else "",
+                r["last_price"] if r["last_price"] else (r["products_cost"] or ""),
                 f"{r['revenue_30d']:.0f}",
                 r["orders_30d"], r["views_30d"],
-                f"{r['last_price']:.0f}", prio,
+                f"{r['last_sale_price']:.0f}", prio,
             ])
 
     sold = sum(1 for r in rows if r["revenue_30d"] > 0)
     with_views = sum(1 for r in rows if r["views_30d"] > 0 and r["revenue_30d"] == 0)
     silent = sum(1 for r in rows if r["views_30d"] == 0 and r["revenue_30d"] == 0)
-    has_cost = sum(1 for r in rows if r["cost_price"] is not None)
+    has_cost = sum(1 for r in rows if r["last_price"] or r["products_cost"])
 
     print(f"\nРаспределение:")
     print(f"  Продавались за 30 дней:      {sold:>5}")
-    print(f"  Были показы, но без продаж:  {with_views:>5}")
+    print(f"  Были показы, без продаж:     {with_views:>5}")
     print(f"  Совсем тихие:                {silent:>5}")
     print(f"  Уже с себестоимостью:        {has_cost:>5}")
-
-    print(f"\nГотово.")
-    print(f"  {OUT_MAIN}  — редактируй тут")
-    print(f"  {OUT_INFO}  — справочно")
 
     con.close()
 
