@@ -29,3 +29,4 @@ env/
 .idea/
 .DS_Store
 Thumbs.db
+app_backup_*/
