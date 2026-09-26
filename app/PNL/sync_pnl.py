@@ -97,64 +97,36 @@ def get_pnl_for_month(month):
         cat = CATEGORY_MAP.get(row["type_id"], "Без категории")
         cats[cat] = cats.get(cat, 0) + abs(f(row["total"]))
 
-    # Себестоимость: delivered × cost по SKU из realization
+    # Себестоимость = продажи × cost.
+    # Источник: monthly_realization_rows (то, что Ozon кладёт в Отчёт по экономике).
+    # Возвраты (is_return=1) не учитываем.
     cogs = 0.0
+    for r in con.execute("""
+        SELECT sku, SUM(quantity) AS q
+        FROM monthly_realization_rows
+        WHERE month = ? AND is_return = 0 AND quantity > 0
+        GROUP BY sku
+    """, (month,)):
+        sku = r["sku"]
+        qty = f(r["q"])
+        if qty <= 0:
+            continue
 
-    # Основной путь: sales_daily (есть с июня)
-    real_skus = [r[0] for r in con.execute(
-        "SELECT DISTINCT sku FROM monthly_realization_rows WHERE month = ?", (month,)
-    )]
-    if real_skus:
-        q = ",".join("?" * len(real_skus))
-        for row in con.execute(f"""
-            SELECT
-                (SELECT cost_price FROM product_cost_history
-                 WHERE sku = sd.sku AND date_from < ?
-                 ORDER BY date_from DESC LIMIT 1) AS cost_price,
-                SUM(sd.delivered) AS d
-            FROM sales_daily sd
-            WHERE sd.date >= ? AND sd.date < ? AND sd.sku IN ({q})
-            GROUP BY sd.sku
-        """, (d2, d1, d2, *real_skus)):
-            cost = f(row[0]) if row[0] is not None else 0
-            if cost > 0:
-                cogs += cost * f(row[1])
+        r2 = con.execute("""
+            SELECT cost_price FROM product_cost_history
+            WHERE sku = ? AND date_from < ?
+            ORDER BY date_from DESC LIMIT 1
+        """, (sku, d2)).fetchone()
+        cost = f(r2[0]) if r2 and r2[0] else 0
+        if cost == 0:
+            continue
 
-    # Fallback: если sales_daily пусто (янв-май) — через accruals POSTING
-    if cogs == 0:
-        # Fallback: каждый unit_number — +1 если продажа, -1 если возврат
-        for row in con.execute("""
-            SELECT sku, SUM(sign) AS units
-            FROM (
-                SELECT DISTINCT a.sku, a.unit_number,
-                       CASE WHEN a.seller_price > 0 THEN 1
-                            WHEN a.seller_price < 0 THEN -1
-                            ELSE 0 END AS sign
-                FROM accruals a
-                WHERE a.date >= ? AND a.date < ?
-                  AND a.accrued_category = 'POSTING'
-                  AND a.seller_price IS NOT NULL
-                  AND a.sku IS NOT NULL
-            )
-            GROUP BY sku
-        """, (d1, d2)):
-            sku = row[0]
-            units = int(row[1] or 0)
-            if units == 0:
-                continue
-            r = con.execute("""
-                SELECT cost_price FROM product_cost_history
-                WHERE sku = ? AND date_from < ?
-                ORDER BY date_from DESC LIMIT 1
-            """, (sku, d2)).fetchone()
-            cost = f(r[0]) if r and r[0] else 0
-            if cost > 0:
-                cogs += units * cost
+        cogs += cost * qty
 
     con.close()
 
     revenue = sale_price + bonus + coinv
-    ads = cats.get("Реклама", 0)
+    ads = cats.get("Реклама PPC", 0)
     services_no_ads = sum(v for k, v in cats.items()
                        if k not in ("Реклама", "ItemCompensation"))
     expenses_no_ads = commission + services_no_ads - cats.get("ItemCompensation", 0)
