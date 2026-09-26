@@ -27,11 +27,11 @@ OZON = {
 
 # ── Наша группировка (по логике Ozon) ──
 GROUPS = {
-    "logistic": [32, 59, 98, 16],                   # Logistic, ReturnFlow, DeliveryToHandover, Drop-Off
-    "agents":   [1, 74, 29, 45],                    # Acquiring, Stars, LastMile, PickUp
-    "fbo":      [46, 71, 76, 12, 77],               # Placements, SellerReturns, StockInsurance, CrossDock, SupplyInbound
-    "other":    [14, 15, 48, 52, 93, 94, 78, 79],   # DefectRate, Disposal, Premium*, Temp*
-    "dRR":      [41, 54, 3, 47, 96],                # PayPerClick, Promotion, BrandCommission, PointsForReviews, AcceleratedReview
+    "logistic": [32, 59, 98, 16, 17, 38, 39],
+    "agents":   [1, 74, 79, 29, 45],
+    "fbo":      [46, 71, 76, 12, 77],
+    "other":    [14, 15, 18, 20, 78, 93, 94],
+    "dRR":      [41, 54, 3, 47, 96, 22, 52, 48],
 }
 
 MONTHS = ["2026-01","2026-02","2026-03","2026-04","2026-05"]
@@ -42,10 +42,10 @@ def service_sum(month, type_ids):
     if not type_ids:
         return 0.0
     ids = ",".join(map(str, type_ids))
-    q = (f"SELECT SUM(ABS(amount)) FROM accruals_services "
+    q = (f"SELECT SUM(amount) FROM accruals_services "
          f"WHERE date >= '{month}-01' AND date <= '{month}-31' "
          f"AND type_id IN ({ids})")
-    return c.execute(q).fetchone()[0] or 0.0
+    return abs(c.execute(q).fetchone()[0] or 0.0)
 
 
 def commission(month):
