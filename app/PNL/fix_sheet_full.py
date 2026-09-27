@@ -18,15 +18,15 @@ def cl(n):
         n,r=divmod(n-1,26); s=chr(65+r)+s
     return s
 
-MONTHS=[cl(i) for i in range(3,15)]
-QUARTERS={"O":("C","E"),"P":("F","H"),"Q":("I","K"),"R":("L","N")}
+MONTHS=[cl(i) for i in range(4,16)]  # D..O
+QUARTERS={"P":("D","F"),"Q":("G","I"),"R":("J","L"),"S":("M","O")}
 
 SUM_ROWS=[3,4,5,6, 8,9,10,11,12, 14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,
           32, 34, 37,38,39,40, 44, 49, 50]
 
 u=[]
 for r in SUM_ROWS:
-    u.append({"range":f"B{r}","values":[[f"=SUM(C{r}:N{r})"]]})
+    u.append({"range":f"B{r}","values":[[f"=SUM(D{r}:O{r})"]]})
 u.append({"range":"B36","values":[["=SUM(B37:B40)"]]})
 u.append({"range":"B42","values":[["=B34-B36"]]})
 u.append({"range":"B46","values":[["=B42+B44"]]})

@@ -19,9 +19,9 @@ WHITE=rgb("FFFFFF"); BLACK=rgb("000000"); GREY_TXT=rgb("666666")
 NAVY=rgb("2F5496"); HEAD_FG=rgb("FFFFFF"); YEAR_BG=rgb("D9E2F3")
 QUART_BG=rgb("E4DFEC"); GREEN_BG=rgb("C6E0B4"); GREEN_FG=rgb("1F4E1F")
 RED_TXT=rgb("833C0C"); ORANGE_BG=rgb("FCE4D6"); RED_BG=rgb("F4CCCC")
-RED_FG=rgb("7F0000"); BORDER=rgb("BFBFBF")
+RED_FG=rgb("7F0000"); ORANGE_FG=rgb("7F3F00"); BORDER=rgb("BFBFBF")
 
-def grid(sid,r0,r1,c0=0,c1=19):
+def grid(sid,r0,r1,c0=0,c1=20):
     return {"sheetId":sid,"startRowIndex":r0,"endRowIndex":r1,
             "startColumnIndex":c0,"endColumnIndex":c1}
 
@@ -75,6 +75,15 @@ def build_requests(sid, net_val):
     reqs.append({"repeatCell":{"range":grid(sid,31,32),
         "cell":{"userEnteredFormat":cell(fg=RED_TXT,bold=True,size=11)},
         "fields":"userEnteredFormat"}})
+    # колонка C — узкая, серая, italic
+    reqs.append({"repeatCell":{"range":grid(sid,2,N,2,3),
+        "cell":{"userEnteredFormat":cell(bg=WHITE,fg=GREY_TXT,italic=True,size=10)},
+        "fields":"userEnteredFormat"}})
+    # колонка T — серая, italic, align LEFT
+    reqs.append({"repeatCell":{"range":grid(sid,2,N,19,20),
+        "cell":{"userEnteredFormat":cell(bg=WHITE,fg=GREY_TXT,italic=True,size=10,align="LEFT")},
+        "fields":"userEnteredFormat"}})
+
     # родители без фона
     for r in (16,21,36):
         reqs.append({"repeatCell":{"range":grid(sid,r-1,r),
@@ -108,15 +117,19 @@ def build_requests(sid, net_val):
     reqs.append({"repeatCell":{"range":grid(sid,2,N,0,1),
         "cell":{"userEnteredFormat":{"horizontalAlignment":"LEFT"}},
         "fields":"userEnteredFormat.horizontalAlignment"}})
-    reqs.append({"repeatCell":{"range":grid(sid,2,N,1,19),
+    reqs.append({"repeatCell":{"range":grid(sid,2,N,1,20),
         "cell":{"userEnteredFormat":{"horizontalAlignment":"RIGHT"}},
         "fields":"userEnteredFormat.horizontalAlignment"}})
     # числа
     NUM='# ##0.00;-# ##0.00'
-    reqs.append({"repeatCell":{"range":grid(sid,2,N,1,19),
+    reqs.append({"repeatCell":{"range":grid(sid,2,N,1,20),
         "cell":{"userEnteredFormat":{"numberFormat":{"type":"NUMBER","pattern":NUM}}},
         "fields":"userEnteredFormat.numberFormat"}})
-    reqs.append({"repeatCell":{"range":grid(sid,46,47,1,19),
+    # C — проценты
+    reqs.append({"repeatCell":{"range":grid(sid,2,N,2,3),
+        "cell":{"userEnteredFormat":{"numberFormat":{"type":"NUMBER","pattern":'0.00" %"'}}},
+        "fields":"userEnteredFormat.numberFormat"}})
+    reqs.append({"repeatCell":{"range":grid(sid,46,47,1,20),
         "cell":{"userEnteredFormat":{"numberFormat":{"type":"NUMBER","pattern":'0.00" %"'}}},
         "fields":"userEnteredFormat.numberFormat"}})
     # ширины
@@ -124,9 +137,32 @@ def build_requests(sid, net_val):
         "properties":{"pixelSize":320},"fields":"pixelSize"}})
     reqs.append({"updateDimensionProperties":{"range":{"sheetId":sid,"dimension":"COLUMNS","startIndex":1,"endIndex":2},
         "properties":{"pixelSize":120},"fields":"pixelSize"}})
-    for i in range(2,19):
+    for i in range(3,19):
         reqs.append({"updateDimensionProperties":{"range":{"sheetId":sid,"dimension":"COLUMNS","startIndex":i,"endIndex":i+1},
             "properties":{"pixelSize":85},"fields":"pixelSize"}})
+    reqs.append({"updateDimensionProperties":{"range":{"sheetId":sid,"dimension":"COLUMNS","startIndex":2,"endIndex":3},
+        "properties":{"pixelSize":75},"fields":"pixelSize"}})
+    reqs.append({"updateDimensionProperties":{"range":{"sheetId":sid,"dimension":"COLUMNS","startIndex":19,"endIndex":20},
+        "properties":{"pixelSize":115},"fields":"pixelSize"}})
+    # условное форматирование T (приоритет — первый)
+    for prefix, bg, fg in [
+        ("!!", RED_BG, RED_FG),
+        ("⚠", ORANGE_BG, ORANGE_FG),
+        ("✓", GREEN_BG, GREEN_FG),
+    ]:
+        reqs.append({"addConditionalFormatRule":{
+            "rule":{
+                "ranges":[grid(sid,2,N,19,20)],
+                "booleanRule":{
+                    "condition":{"type":"TEXT_STARTS_WITH",
+                                 "values":[{"userEnteredValue":prefix}]},
+                    "format":{"backgroundColor":bg,
+                              "textFormat":{"foregroundColor":fg,"bold":True}}
+                }
+            },
+            "index":0
+        }})
+
     # границы
     reqs.append({"updateBorders":{"range":grid(sid,0,1),
         "bottom":{"style":"SOLID_THICK","color":NAVY}}})

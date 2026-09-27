@@ -50,6 +50,71 @@ MONTHS = ["янв", "фев", "мар", "апр", "май", "июн",
 QUARTERS = ["1 кв", "2 кв", "3 кв", "4 кв"]
 
 
+def make_verdict(label, pct_signed):
+    """Текстовый вердикт для колонки T."""
+    lbl = label.strip().lower()
+
+    # ── родительские суммы ──
+    if "фулфилмент" in lbl and ":" in label:
+        pct = abs(pct_signed)
+        if pct <= 8: return "✓ норма"
+        if pct <= 12: return "⚠ высоко"
+        return "!! критично"
+    if "маркетинг" in lbl and ":" in label:
+        pct = abs(pct_signed)
+        if pct <= 10: return "✓ норма"
+        if pct <= 15: return "⚠ высоко"
+        return "!! критично"
+    if "прямые" in lbl and "расход" in lbl:
+        pct = abs(pct_signed)
+        if pct <= 60: return "✓ норма"
+        if pct <= 75: return "⚠ высоко"
+        return "!! критично"
+
+    # ── маржинальные ──
+    if "валовая прибыль" in lbl or "чистая прибыль" in lbl or "ebitda" in lbl:
+        if pct_signed >= 20: return "✓ норма"
+        if pct_signed >= 10: return "⚠ средне"
+        if pct_signed >= 0:  return "⚠ низко"
+        return "!! убыток"
+    if "доходы" in lbl and ":" not in label:
+        return "✓ база"
+
+    # ── баллы и партнёрские — не расходы ──
+    if "баллы" in lbl and "начислено" not in lbl:
+        return "✓ компенсация"
+    if "программы партнёров" in lbl:
+        return "✓ партнёрские"
+
+    # ── расходные ──
+    pct = abs(pct_signed)
+    if "комиссия" in lbl:
+        if pct <= 45: return "✓ норма"
+        if pct <= 55: return "⚠ высоко"
+        return "!! критично"
+    if "логистика" in lbl and "обратная" not in lbl:
+        if pct <= 8: return "✓ норма"
+        if pct <= 12: return "⚠ высоко"
+        return "!! критично"
+    if "себестоимость" in lbl:
+        if pct <= 35: return "✓ норма"
+        if pct <= 45: return "⚠ высоко"
+        return "!! критично"
+    if "реклама" in lbl:
+        if pct <= 10: return "✓ норма"
+        if pct <= 15: return "⚠ высоко"
+        return "!! критично"
+    if "fbo" in lbl:
+        if pct <= 3: return "✓ норма"
+        if pct <= 5: return "⚠ высоко"
+        return "!! критично"
+    if "другие услуги" in lbl or "прочие" in lbl:
+        if pct <= 1: return "✓ норма"
+        if pct <= 3: return "⚠ мелкие штрафы"
+        return "!! штрафы"
+    return ""
+
+
 def f(v):
     try:
         return float(v or 0)
@@ -190,8 +255,10 @@ def add_calc_formulas(rows):
        47 = -46/32*100 ROI
     """
     COL_YEAR = 2
-    COL_MONTH_1 = 3
-    COL_Q1 = 15
+    COL_PCT = 3
+    COL_MONTH_1 = 4
+    COL_Q1 = 16
+    COL_VERDICT = 20
 
     def year_sum(row_idx):
         c1 = col_letter(COL_MONTH_1)
@@ -217,13 +284,13 @@ def add_calc_formulas(rows):
         rows[35][idx] = f"=SUM({c}37:{c}40)"
     year_sum(35); quarter_sums(35)
 
-    for idx in range(1, 18):
+    for idx in range(1, 19):
         col = col_letter(idx + 1)
         rows[41][idx] = f"={col}34-{col}36"
-    for idx in range(1, 18):
+    for idx in range(1, 19):
         col = col_letter(idx + 1)
         rows[45][idx] = f"={col}42+{col}44"
-    for idx in range(1, 18):
+    for idx in range(1, 19):
         col = col_letter(idx + 1)
         rows[46][idx] = f"=IF({col}32=0;0;-{col}46/{col}32*100)"
 
@@ -233,8 +300,10 @@ def build_table(year=2026):
     by_month = {m: get_pnl_for_month(m) for m in all_months}
 
     COL_YEAR = 2
-    COL_MONTH_1 = 3
-    COL_Q1 = 15
+    COL_PCT = 3
+    COL_MONTH_1 = 4
+    COL_Q1 = 16
+    COL_VERDICT = 20
 
     def mcol(mn):
         return COL_MONTH_1 + (mn - 1)
@@ -243,14 +312,16 @@ def build_table(year=2026):
         return COL_Q1 + (q - 1)
 
     rows = []
-    rows.append(["Отчёт о прибылях и убытках OZON"] + [""] * 18)
+    rows.append(["Отчёт о прибылях и убытках OZON"] + [""] * 19)
 
-    row2 = [""] * 19
+    row2 = [""] * 20
     row2[1] = f"Всего за {year}"
+    row2[2] = "% от базы"
     for i, name in enumerate(MONTHS):
         row2[mcol(i + 1) - 1] = name
     for i, name in enumerate(QUARTERS):
         row2[qcol(i + 1) - 1] = name
+    row2[19] = "выводы"
     rows.append(row2)
 
     lines = [
@@ -311,8 +382,10 @@ def build_table(year=2026):
                 "ppc", "promo", "stars", "brand", "market_total",
                 "agents", "fbo", "other", "misc", "tax"}
 
+    base_year = sum(d.get("revenue", 0) for d in by_month.values())
+
     for label, key in lines:
-        row = [""] * 19
+        row = [""] * 20
         row[0] = label
         if key is None:
             rows.append(row)
@@ -322,6 +395,9 @@ def build_table(year=2026):
         c1 = col_letter(COL_MONTH_1)
         c12 = col_letter(COL_MONTH_1 + 11)
         row[COL_YEAR - 1] = f"=SUM({c1}{r_num}:{c12}{r_num})"
+        skip_pct = label.strip().lower() in ("заказы (справочно)", "начислено баллов")
+        if not skip_pct:
+            row[COL_PCT - 1] = f"=IF($B$5=0;0;B{r_num}/$B$5*100)"
 
         for m_str, data in by_month.items():
             m_num = int(m_str.split("-")[1])
@@ -336,6 +412,12 @@ def build_table(year=2026):
             cA = col_letter(mcol(m1))
             cB = col_letter(mcol(m2))
             row[qcol(q) - 1] = f"=SUM({cA}{r_num}:{cB}{r_num})"
+
+        year_val = sum(d.get(key, 0) for d in by_month.values())
+        if key in NEGATIVE:
+            year_val = -abs(year_val)
+        pct_signed = (year_val / base_year * 100) if base_year else 0
+        row[COL_VERDICT - 1] = make_verdict(label, pct_signed)
 
         rows.append(row)
 
@@ -409,17 +491,17 @@ def apply_format(ws, n_rows):
     BORDER_MED = {"red": 0.75, "green": 0.75, "blue": 0.75}
 
     # ─── 1. Заголовок A1:S1 ────────────────────────────────
-    reqs.append({"unmergeCells": {"range": grid("A1:S1")}})
-    reqs.append({"mergeCells": {"range": grid("A1:S1"),
+    reqs.append({"unmergeCells": {"range": grid("A1:T1")}})
+    reqs.append({"mergeCells": {"range": grid("A1:T1"),
                                 "mergeType": "MERGE_ALL"}})
-    fmt("A1:S1", bg=BLUE, fg=WHITE, bold=True, size=16, align="CENTER")
+    fmt("A1:T1", bg=BLUE, fg=WHITE, bold=True, size=16, align="CENTER")
     reqs.append({"updateDimensionProperties": {
         "range": {"sheetId": sid, "dimension": "ROWS",
                   "startIndex": 0, "endIndex": 1},
         "properties": {"pixelSize": 45}, "fields": "pixelSize"}})
 
     # ─── 2. Шапка колонок (строка 2) ───────────────────────
-    fmt("A2:S2", bg=GREY_H, fg=NAVY, bold=True, size=11, align="CENTER")
+    fmt("A2:T2", bg=GREY_H, fg=NAVY, bold=True, size=11, align="CENTER")
     reqs.append({"updateDimensionProperties": {
         "range": {"sheetId": sid, "dimension": "ROWS",
                   "startIndex": 1, "endIndex": 2},
@@ -427,21 +509,21 @@ def apply_format(ws, n_rows):
 
     # ─── 3. Справочные строки (3-6) ────────────────────────
     for r in (3, 4, 5, 6):
-        fmt(f"A{r}:S{r}", fg=GREY_T, italic=True, size=10)
+        fmt(f"A{r}:T{r}", fg=GREY_T, italic=True, size=10)
 
     # ─── 4. ДОХОДЫ (8) + подстроки (9-12) ──────────────────
     fmt("A8:S8",  bg=GREEN_BG, fg=GREEN_FG, bold=True, size=11)
     for r in (9, 10, 11, 12):
-        fmt(f"A{r}:S{r}", size=10)
+        fmt(f"A{r}:T{r}", size=10)
 
     # ─── 5. ПРЯМЫЕ РАСХОДЫ (14) + подстроки (15-27) ────────
     fmt("A14:S14", bg=RED_BG, fg=RED_FG, bold=True, size=11)
     SUB_SUB = {17, 18, 19, 20, 22, 23}          # логистика, отзывы и пр.
     for r in range(15, 28):
         if r in SUB_SUB:
-            fmt(f"A{r}:S{r}", fg=GREY_T, italic=True, size=9)
+            fmt(f"A{r}:T{r}", fg=GREY_T, italic=True, size=9)
         else:
-            fmt(f"A{r}:S{r}", size=10)
+            fmt(f"A{r}:T{r}", size=10)
 
     # ─── 6. Себестоимость (29) ─────────────────────────────
     fmt("A29:S29", fg=RED_FG, bold=True, size=10)
@@ -452,7 +534,7 @@ def apply_format(ws, n_rows):
     # ─── 8. ОПЕРАЦИОННЫЕ (33-37) ───────────────────────────
     fmt("A33:S33", bg=GREY_H, fg=NAVY, bold=True, size=11)
     for r in range(34, 38):
-        fmt(f"A{r}:S{r}", fg=GREY_T, italic=True, size=9)
+        fmt(f"A{r}:T{r}", fg=GREY_T, italic=True, size=9)
 
     # ─── 9. EBITDA (39) ────────────────────────────────────
     fmt("A39:S39", bg=YEL_BG, fg=YEL_FG, bold=True, size=11)
@@ -475,7 +557,7 @@ def apply_format(ws, n_rows):
 
     # ─── 12. ROI и хвост (44-47) ───────────────────────────
     for r in range(44, 48):
-        fmt(f"A{r}:S{r}", fg=GREY_T, italic=True, size=10)
+        fmt(f"A{r}:T{r}", fg=GREY_T, italic=True, size=10)
 
     # ─── 13. Выравнивание ──────────────────────────────────
     for r in range(3, n_rows + 1):
@@ -486,13 +568,13 @@ def apply_format(ws, n_rows):
     RUB = '#,##0.00" ₽";[Red]-#,##0.00" ₽"'
     PCT = '0.00" %"'
     reqs.append({"repeatCell": {
-        "range": grid(f"B3:S{n_rows}"),
+        "range": grid(f"B3:T{n_rows}"),
         "cell": {"userEnteredFormat": {"numberFormat": {
             "type": "NUMBER", "pattern": RUB}}},
         "fields": "userEnteredFormat.numberFormat"}})
     # ROI — проценты
     reqs.append({"repeatCell": {
-        "range": grid("B44:S44"),
+        "range": grid("B44:T44"),
         "cell": {"userEnteredFormat": {"numberFormat": {
             "type": "NUMBER", "pattern": PCT}}},
         "fields": "userEnteredFormat.numberFormat"}})
@@ -520,7 +602,7 @@ def apply_format(ws, n_rows):
 
     # ─── 17. Границы ───────────────────────────────────────
     reqs.append({"updateBorders": {
-        "range": grid("A1:S1"),
+        "range": grid("A1:T1"),
         "bottom": {"style": "SOLID_THICK", "color": BLUE}}})
     for rng in ("A8:S8", "A14:S14", "A33:S33"):
         reqs.append({"updateBorders": {
@@ -598,8 +680,8 @@ def read_operational(ws):
     for r in (37, 38, 39, 40):
         try:
             row = ws.row_values(r, value_render_option="UNFORMATTED_VALUE")
-            # C..N = 1-based колонки 3..14 = 0-based индексы 2..13
-            for idx in range(2, 14):
+            # D..O = 1-based колонки 4..15 = 0-based индексы 3..14
+            for idx in range(3, 15):
                 if idx < len(row):
                     v = row[idx]
                     if v is not None and str(v).strip() not in ("", "0"):
