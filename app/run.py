@@ -64,6 +64,7 @@ def run(cmd, stop_on_error=True):
 def main():
     do_archive = "--archive" in sys.argv
     skip_effects = "--no-effects" in sys.argv
+    skip_dashboard = "--no-dashboard" in sys.argv
 
     print("=" * 100)
     print(f"УТРЕННИЙ РИТУАЛ  |  {datetime.now().strftime('%d.%m.%Y %H:%M')}")
@@ -90,6 +91,16 @@ def main():
     # 3. Финансы из API
     print("\n[3] Синхронизация финансов из Ozon API...")
     run([PY, "sync_finance.py"], stop_on_error=False)
+
+    # 3.5. Проверка новых type_id (алерт, не блокирует)
+    print("\n[3.5] Проверка новых type_id...")
+    run([PY, "PNL\\_diag\\check_all_types.py"], stop_on_error=False)
+
+    # 3.6. P&L — сборка и выгрузка в Google Sheets
+    print("\n[3.6] Сборка P&L в Google Sheets...")
+    run([PY, "PNL\\sync_pnl.py", "2026"], stop_on_error=False)
+    run([PY, "PNL\\pnl_format.py"], stop_on_error=False)
+    run([PY, "PNL\\fix_sheet_full.py"], stop_on_error=False)
 
     # 4. Актуальные цены
     print("\n[4] Актуальные цены из Ozon API...")
@@ -122,9 +133,12 @@ def main():
     print("\n[10] Выгружаю в Google Sheets...")
     run([PY, "sheets_sync.py"], stop_on_error=False)
 
-    # 11. Локальный пульт
-    print("\n[11] Открываю пульт...")
-    run([PY, "daily_dashboard.py"])
+    # 11. Локальный пульт (пропускается при --no-dashboard)
+    if skip_dashboard:
+        print("\n[11] Пульт не открываю (--no-dashboard)")
+    else:
+        print("\n[11] Открываю пульт...")
+        run([PY, "daily_dashboard.py"])
 
     # 12. Дневник решений
     if not skip_effects:
