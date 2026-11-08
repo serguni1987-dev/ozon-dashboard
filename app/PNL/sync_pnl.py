@@ -28,7 +28,7 @@ CREDENTIALS = os.path.join(APP_DIR, "credentials.json")
 
 DEFAULT_TAX_RATE = 0.05
 MIN_TAX_RATE = 0.01            # минимальный налог УСН Д−Р — 1% от доходов
-FIXED_CONTRIB_YEAR = 53658.0   # фиксированные взносы ИП за 2026, делятся на 12 месяцев
+FIXED_CONTRIB_YEAR = 57390.0   # фиксированные взносы ИП за 2026 (ст. 430 НК; 2025 было 53 658), делятся на 12 месяцев
 SETTINGS_SHEET = "НАСТРОЙКИ"
 SETTINGS_CELL = "B1"
 

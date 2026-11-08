@@ -11,7 +11,7 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapi
 SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
 
 # Константы для 2026 года
-FIXED_IP_CONTRIB = 53658.0  # Фиксированные взносы ИП
+FIXED_IP_CONTRIB = 57390.0  # Фиксированные взносы ИП за 2026 (ст. 430 НК; 2025 было 53 658)
 LIMIT_300K = 300000.0
 
 def build(year, rate_pct=None):
@@ -132,8 +132,8 @@ def main():
         ["28.07.2026", "Аванс УСН за полугодие", "Расчет по кварталам"],
         ["28.10.2026", "Аванс УСН за 9 месяцев", "Расчет по кварталам"],
         ["28.04.2027", "Итоговый налог за год", data['tax_to_pay']],
-        ["01.12.2026", "Страховые взносы ИП (1% с превышения)", data['variable_contrib']],
-        ["31.12.2026", "Фиксированные взносы ИП (можно разбить по кварталам)", data['fixed_contrib']]
+        ["28.12.2026", "Фиксированные взносы ИП (можно разбить по кварталам)", data['fixed_contrib']],
+        ["01.07.2027", "Страховые взносы ИП (1% с превышения 300 000 по базе Д−Р)", data['variable_contrib']]
     ], range_name="A21")
     
     ws.format("C22:C27", {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}})
