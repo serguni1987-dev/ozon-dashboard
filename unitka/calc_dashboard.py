@@ -4,6 +4,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from .db import connect
 from .calc_taxes import build as build_taxes
+from .finance_core import ozon_pnl, month_range, year_range, receivables as calc_receivables, tax_rate_pct
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRED = os.path.join(APP_DIR, "app", "credentials.json")
@@ -35,7 +36,7 @@ def main():
 
     cash, ap = get_manual_inputs(sh)
     
-    tax_data = build_taxes(2026) 
+    tax_data = build_taxes(2026, tax_rate_pct(sh))
     real_tax = tax_data['tax_to_pay']
     total_contrib = tax_data['total_contrib']
     total_burden = real_tax + total_contrib
@@ -53,51 +54,28 @@ def main():
     prev_month_str = prev_month_dt.strftime('%Y-%m')
     prev_month_name = months_ru[prev_month_dt.month - 1]
 
-    # --- 1. Сбор данных за месяц ---
+    # --- 1. Сбор данных за месяц (единая формула finance_core: с комиссией Ozon) ---
     def get_month_stats(m_str):
-        cur.execute("SELECT COALESCE(SUM(sale_price + bonus + coinvestment), 0) FROM accruals WHERE date LIKE ?", (f"{m_str}-%",))
-        rev = cur.fetchone()[0]
-        cur.execute("SELECT COALESCE(SUM(ABS(amount)), 0) FROM finance_transactions WHERE type = 'deduction' AND date LIKE ?", (f"{m_str}-%",))
-        exp = cur.fetchone()[0]
-        cur.execute("""
-            SELECT SUM(m.quantity * c.cost_price) FROM monthly_realization_rows m
-            LEFT JOIN (SELECT sku, cost_price FROM product_cost_history WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)) c ON m.sku = c.sku
-            WHERE m.month = ? AND m.is_return = 0
-        """, (m_str,))
-        cogs = cur.fetchone()[0] or 0.0
-        
-        profit = rev - cogs - exp
-        margin = (profit / rev * 100) if rev > 0 else 0
-        return {"rev": rev, "profit": profit, "margin": margin}
+        y, m = int(m_str[:4]), int(m_str[5:7])
+        p = ozon_pnl(cur, *month_range(y, m))
+        return {"rev": round(p["income"], 2), "profit": round(p["gross_profit"], 2),
+                "margin": round(p["margin_pct"], 1), "cogs_missing": p["cogs_missing"],
+                "cogs_estimated": p["cogs_estimated"]}
 
     cur_stats = get_month_stats(current_month_str)
     prev_stats = get_month_stats(prev_month_str)
 
     # --- 2. Сбор данных за ГОД (YTD) ---
     def get_ytd_stats(year_str):
-        cur.execute("SELECT COALESCE(SUM(sale_price + bonus + coinvestment), 0) FROM accruals WHERE date LIKE ?", (f"{year_str}-%",))
-        rev = cur.fetchone()[0]
-        cur.execute("SELECT COALESCE(SUM(ABS(amount)), 0) FROM finance_transactions WHERE type = 'deduction' AND date LIKE ?", (f"{year_str}-%",))
-        exp = cur.fetchone()[0]
-        cur.execute("""
-            SELECT SUM(m.quantity * c.cost_price) FROM monthly_realization_rows m
-            LEFT JOIN (SELECT sku, cost_price FROM product_cost_history WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)) c ON m.sku = c.sku
-            WHERE m.month LIKE ? AND m.is_return = 0
-        """, (f"{year_str}-%",))
-        cogs = cur.fetchone()[0] or 0.0
-        
-        profit = rev - cogs - exp
-        margin = (profit / rev * 100) if rev > 0 else 0
-        return {"rev": rev, "profit": profit, "margin": margin}
+        p = ozon_pnl(cur, *year_range(int(year_str)))
+        return {"rev": round(p["income"], 2), "profit": round(p["gross_profit"], 2),
+                "margin": round(p["margin_pct"], 1), "cogs_missing": p["cogs_missing"],
+                "cogs_estimated": p["cogs_estimated"]}
 
     ytd_stats = get_ytd_stats(str(now.year))
 
-    # --- 3. Дебиторка ---
-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_transactions")
-    acc = cur.fetchone()[0]
-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_payouts")
-    pay = cur.fetchone()[0]
-    receivables = acc - pay
+    # --- 3. Дебиторка: фактический баланс Ozon (balance_periods), иначе начислено − выплачено ---
+    receivables = round(calc_receivables(cur), 2)
 
     # --- 4. Склад и Неликвид ---
     cur.execute("SELECT MAX(date) FROM stock_daily")
@@ -135,8 +113,10 @@ def main():
     # --- 5. ПЛАН СПАСЕНИЯ КАССЫ ---
     discount_rate = 0.30 # Скидка 30% при распродаже
     non_liquid_cash = non_liquid * (1 - discount_rate) # Сколько денег реально получим
-    total_potential = cash + receivables + non_liquid_cash
-    gap = total_potential - total_burden
+    total_potential = round(cash + receivables + non_liquid_cash, 2)
+    total_burden = round(total_burden, 2)
+    gap = round(total_potential - total_burden, 2)
+    non_liquid = round(non_liquid, 2); non_liquid_cash = round(non_liquid_cash, 2)
 
     # --- 6. Логика рекомендаций ---
     recommendations = []
@@ -151,11 +131,20 @@ def main():
     
     if active_stats['rev'] == 0:
         recommendations.append(("⚪ Нет данных о продажах", "В текущем и прошлом месяце нет загруженных продаж."))
+    elif active_stats['cogs_missing']:
+        recommendations.append(("⚪ Себестоимость не загружена", f"За {active_name} есть выручка {active_stats['rev']:,.0f} руб., но себестоимость = 0. Запустите load_realization_daily / load_costs — иначе маржа ложная."))
     elif active_stats['profit'] > 0:
         status = "🟢 Бизнес прибыльный" if active_stats['margin'] > 20 else "🟡 Низкая маржинальность"
-        recommendations.append((status, f"Прибыль за {active_name}: {active_stats['profit']:,.0f} руб. Маржа: {active_stats['margin']:.0f}%."))
+        est = " (себестоимость — оценка, месяц не закрыт)" if active_stats['cogs_estimated'] else ""
+        recommendations.append((status, f"Прибыль за {active_name}: {active_stats['profit']:,.0f} руб. Маржа: {active_stats['margin']:.0f}%.{est}"))
     else:
         recommendations.append(("🔴 БИЗНЕС В УБЫТКЕ!", f"Убыток за {active_name}: {active_stats['profit']:,.0f} руб. Срочно проверьте расходы."))
+
+    # Итог года — чтобы месяц не скрывал годовой результат
+    if ytd_stats['profit'] < 0:
+        recommendations.append(("🔴 ГОД В УБЫТКЕ", f"Валовая прибыль {now.year} YTD: {ytd_stats['profit']:,.0f} руб. (маржа {ytd_stats['margin']:.1f}%). Налог — минимальный 1%: {real_tax:,.0f} руб."))
+    else:
+        recommendations.append(("🟢 Год прибыльный", f"Валовая прибыль {now.year} YTD: {ytd_stats['profit']:,.0f} руб. (маржа {ytd_stats['margin']:.1f}%). Налог: {real_tax:,.0f} руб."))
 
     # Кассовый разрыв (с учетом плана спасения)
     if gap >= 0:

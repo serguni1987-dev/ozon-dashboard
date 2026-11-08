@@ -50,14 +50,20 @@ def cell(bg=None, fg=None, bold=False, italic=False, size=11, align=None):
     return cf
 
 
-def build_requests(sid, net_val):
+def build_requests(sid, net_val, n_cf_existing=0):
     reqs = []; N = 50
 
+    # Старые правила условного форматирования удаляем: каждый запуск добавлял
+    # свои 7 правил заново, за месяцы накопилось >200 дублей (тормозит лист).
+    for _ in range(n_cf_existing):
+        reqs.append({"deleteConditionalFormatRule": {"sheetId": sid, "index": 0}})
+
     # Заголовок (строка 1)
+    # Заголовок не объединяем: объединённая A1:T1 не даёт заморозить колонку A,
+    # а без заморозки названия строк пропадают при прокрутке к кварталам.
     reqs.append({"unmergeCells": {"range": grid(sid, 0, 1)}})
-    reqs.append({"mergeCells": {"range": grid(sid, 0, 1), "mergeType": "MERGE_ALL"}})
     reqs.append({"repeatCell": {"range": grid(sid, 0, 1),
-        "cell": {"userEnteredFormat": cell(bg=NAVY, fg=HEAD_FG, bold=True, size=16, align="CENTER")},
+        "cell": {"userEnteredFormat": cell(bg=NAVY, fg=HEAD_FG, bold=True, size=16, align="LEFT")},
         "fields": "userEnteredFormat"}})
     reqs.append({"updateDimensionProperties": {
         "range": {"sheetId": sid, "dimension": "ROWS", "startIndex": 0, "endIndex": 1},
@@ -158,7 +164,7 @@ def build_requests(sid, net_val):
         "fields": "userEnteredFormat.horizontalAlignment"}})
 
     # Числовой формат: RUB для B:T
-    RUB = '# ##0.00;[Red]-# ##0.00'
+    RUB = '# ##0;[Red]-# ##0'   # без копеек: P&L читают в тысячах, копейки — шум
     reqs.append({"repeatCell": {"range": grid(sid, 2, N, 1, 20),
         "cell": {"userEnteredFormat": {"numberFormat": {"type": "NUMBER", "pattern": RUB}}},
         "fields": "userEnteredFormat.numberFormat"}})
@@ -235,6 +241,42 @@ def build_requests(sid, net_val):
                        "textFormat": {"foregroundColor": GREY_TXT}}
         }}, "index": 3}})
 
+    # CF на месяцы и кварталы итоговых строк (валовая, EBITDA, чистая, нераспределённая, накопленная)
+    rngRes = [grid(sid, r - 1, r, 3, 19) for r in (34, 42, 46, 49, 50)]
+    reqs.append({"addConditionalFormatRule": {"rule": {
+        "ranges": rngRes,
+        "booleanRule": {
+            "condition": {"type": "NUMBER_LESS", "values": [{"userEnteredValue": "0"}]},
+            "format": {"backgroundColor": RED_BG, "textFormat": {"foregroundColor": RED_FG, "bold": True}}
+        }}, "index": 4}})
+    reqs.append({"addConditionalFormatRule": {"rule": {
+        "ranges": rngRes,
+        "booleanRule": {
+            "condition": {"type": "NUMBER_GREATER", "values": [{"userEnteredValue": "0"}]},
+            "format": {"backgroundColor": GREEN_BG, "textFormat": {"foregroundColor": GREEN_FG, "bold": True}}
+        }}, "index": 5}})
+
+    # Примечания к ключевым строкам — откуда цифра и с чем сверять
+    NOTES = {
+        8:  "Доходы = Отчёт о реализации: цена продажи + баллы Ozon + программы партнёров.\n"
+            "Сверять с ЛК «Экономика магазина → Начислено» и Точкой «Выручка».",
+        14: "Все удержания Ozon: комиссия + услуги (со знаком, компенсации плюсом).\n"
+            "Сверять с ЛК «Экономика магазина → Расходы» и Точкой «Расходы + Реклама».",
+        32: "Себестоимость = (доставлено − возвращено) × закупочная цена (product_cost_history).\n"
+            "Текущий месяц без отчёта о реализации — оценка по начислениям.",
+        34: "Валовая прибыль = Доходы − удержания Ozon − себестоимость. Это деньги до налогов и взносов.",
+        40: "Фиксированные страховые взносы ИП за год / 12. Входят в расходы при УСН «доходы − расходы».",
+        44: "УСН «доходы − расходы», ставка из НАСТРОЙКИ!B1; не меньше 1% от доходов (минимальный налог).\n"
+            "Помесячно — оценка. Налог считается за год — см. лист «Налоги».",
+        46: "Чистая прибыль = EBITDA + налог (налог со знаком минус). Ручные операционные расходы (строки 37–39) учитываются.",
+        50: "Накопленная прибыль — нарастающим итогом с января.",
+    }
+    for r, note in NOTES.items():
+        reqs.append({"updateCells": {
+            "range": grid(sid, r - 1, r, 0, 1),
+            "rows": [{"values": [{"note": note}]}],
+            "fields": "note"}})
+
     # Границы
     reqs.append({"updateBorders": {"range": grid(sid, 0, 1),
         "bottom": {"style": "SOLID_THICK", "color": NAVY}}})
@@ -243,11 +285,11 @@ def build_requests(sid, net_val):
             "top": {"style": "SOLID", "color": BORDER},
             "bottom": {"style": "SOLID", "color": BORDER}}})
 
-        # Freeze: только строки 1–2 (колонки не морозим — мешает merge заголовка)
+    # Freeze: строки 1–2 и колонка A (заголовок больше не объединён)
     reqs.append({"updateSheetProperties": {
         "properties": {"sheetId": sid,
-            "gridProperties": {"frozenRowCount": 2}},
-        "fields": "gridProperties.frozenRowCount"}})
+            "gridProperties": {"frozenRowCount": 2, "frozenColumnCount": 1}},
+        "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"}})
 
     return reqs
 
@@ -267,7 +309,17 @@ def main():
         pass
     print(f"Чистая прибыль (B46) = {net_val}")
 
-    reqs = build_requests(sid, net_val)
+    n_cf = 0
+    try:
+        meta = sh.fetch_sheet_metadata({"fields": "sheets(properties.sheetId,conditionalFormats)"})
+        for sht in meta.get("sheets", []):
+            if sht.get("properties", {}).get("sheetId") == sid:
+                n_cf = len(sht.get("conditionalFormats", []))
+    except Exception as e:
+        print(f"[!] Не прочитал список CF-правил ({e}) — старые правила останутся")
+    print(f"Старых CF-правил: {n_cf}")
+
+    reqs = build_requests(sid, net_val, n_cf)
     total = 0
     for i in range(0, len(reqs), 50):
         chunk = reqs[i:i + 50]

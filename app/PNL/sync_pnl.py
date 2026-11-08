@@ -1,11 +1,18 @@
-﻿"""
+"""
 sync_pnl.py - лист P&L: год по месяцам.
 
 Ставка налога читается из листа НАСТРОЙКИ, ячейка B1.
 Если лист/ячейка недоступны → DEFAULT_TAX_RATE.
 
-COGS: через monthly_realization_rows (is_return=0 − is_return=1) × cost_price.
-Заказы: из orders_created (FBS+FBO, по дате создания).
+COGS: через monthly_realization_rows: (доставлено − возвращено) × cost_price,
+      количество возврата берётся из raw_json (return_commission.quantity),
+      потому что в колонке quantity лежит только количество доставки.
+Услуги Ozon: со знаком (минус — расход, плюс — компенсация/корректировка),
+      чтобы итог расходов совпадал с ЛК «Экономика магазина» и Точкой.
+Налог: УСН «доходы − расходы» (ставка из НАСТРОЙКИ!B1), минимум 1% от доходов.
+      Помесячно — оценка; годовой расчёт — в листе «Налоги» (unitka.calc_taxes).
+Заказы: из orders_created; если выгрузка аналитики Ozon (analytics_manual)
+      показывает больше — берётся она (orders_created обновляется не каждый день).
 """
 import os
 import re
@@ -19,7 +26,9 @@ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB = os.path.join(APP_DIR, "ozon.db")
 CREDENTIALS = os.path.join(APP_DIR, "credentials.json")
 
-DEFAULT_TAX_RATE = 0.15
+DEFAULT_TAX_RATE = 0.05
+MIN_TAX_RATE = 0.01            # минимальный налог УСН Д−Р — 1% от доходов
+FIXED_CONTRIB_YEAR = 53658.0   # фиксированные взносы ИП за 2026, делятся на 12 месяцев
 SETTINGS_SHEET = "НАСТРОЙКИ"
 SETTINGS_CELL = "B1"
 
@@ -164,6 +173,12 @@ def make_verdict(label, pct_signed):
         return "!! убыток"
     if "доходы" in lbl and ":" not in label:
         return "✓ база"
+    if "взносы" in lbl:
+        return "✓ фикс. платёж"
+    if "налог" in lbl:
+        return "годовой расчёт — лист «Налоги»"
+    if "себестоимость" in lbl and "оценка" in lbl:
+        return "⚠ ноябрь — оценка"
 
     if "баллы" in lbl and "начислено" not in lbl:
         return "✓ компенсация"
@@ -228,20 +243,17 @@ def get_pnl_for_month(month, tax_rate):
     # 2. Если отчета нет (текущий месяц) — берем данные из ежедневных начислений (accruals)
     if sale_price == 0 and commission == 0:
         r_daily = con.execute("""
-            SELECT SUM(sale_price) AS slp,
-                   SUM(sale_commission) AS comm
+            SELECT SUM(sale_price) AS slp, SUM(bonus) AS bonus,
+                   SUM(coinvestment) AS coinv, SUM(sale_commission) AS comm
             FROM accruals WHERE substr(date, 1, 7) = ?
         """, (month,)).fetchone()
-        
         sale_price = f(r_daily["slp"])
+        bonus = f(r_daily["bonus"])
+        coinv = f(r_daily["coinv"])
         commission = abs(f(r_daily["comm"]))
-        
-        # Пытаемся достать баллы за скидки
-        r_bonus = con.execute("""
-            SELECT SUM(bonus) AS bonus
-            FROM accruals WHERE substr(date, 1, 7) = ?
-        """, (month,)).fetchone()
-        bonus = f(r_bonus["bonus"]) if r_bonus else 0
+        is_open_month = True
+    else:
+        is_open_month = False
 
     # Заказы (справочно) — из orders_created по дате создания (FBS+FBO)
     try:
@@ -253,6 +265,15 @@ def get_pnl_for_month(month, tax_rate):
     except sqlite3.OperationalError:
         # таблицы orders_created ещё нет — запусти PNL/_diag/fetch_orders_created.py
         orders = 0
+    # orders_created обновляется не каждый день; выгрузка аналитики Ozon точнее
+    try:
+        r3 = con.execute("""
+            SELECT COALESCE(SUM(orders), 0) FROM analytics_manual
+            WHERE substr(date, 1, 7) = ?
+        """, (month,)).fetchone()
+        orders = max(orders, int(r3[0] or 0))
+    except sqlite3.OperationalError:
+        pass
 
     # Услуги из accruals_services
     cats = {}
@@ -265,16 +286,18 @@ def get_pnl_for_month(month, tax_rate):
         cats[cat] = cats.get(cat, 0) + f(row["total"])
 
     # ═══ СЕБЕСТОИМОСТЬ ═══
-    # COGS = продажи (is_return=0) − возвраты (is_return=1), по себестоимости
-    # на конец месяца. Возврат месяца M может относиться к продаже месяца M-1 —
-    # это корректная обратная проводка: вычитаем cost в месяц возврата.
+    # COGS = (доставлено − возвращено) × себестоимость на конец месяца.
+    # В quantity хранится только количество доставки (delivery_commission.quantity);
+    # количество возврата — в raw_json → return_commission.quantity. Строка «только
+    # возврат» имеет quantity = 0, поэтому фильтр quantity > 0 здесь недопустим.
     cogs = 0.0
+    cogs_estimated = False
     for r in con.execute("""
         SELECT sku,
-               SUM(CASE WHEN is_return = 0 THEN quantity ELSE 0 END) AS q_buy,
-               SUM(CASE WHEN is_return = 1 THEN quantity ELSE 0 END) AS q_ret
+               SUM(COALESCE(json_extract(raw_json, '$.delivery_commission.quantity'), quantity, 0)) AS q_buy,
+               SUM(COALESCE(json_extract(raw_json, '$.return_commission.quantity'), 0)) AS q_ret
         FROM monthly_realization_rows
-        WHERE month = ? AND quantity > 0
+        WHERE month = ?
         GROUP BY sku
     """, (month,)):
         sku = r["sku"]
@@ -293,17 +316,39 @@ def get_pnl_for_month(month, tax_rate):
 
         cogs += cost * qty_net
 
+    if is_open_month and cogs == 0:
+        # Отчёта о реализации ещё нет — оценка: каждая строка начисления POSTING
+        # с ценой = 1 проданная штука по текущей себестоимости.
+        r_est = con.execute("""
+            SELECT COALESCE(SUM(c.cost_price), 0)
+            FROM accruals a
+            LEFT JOIN (SELECT sku, cost_price FROM product_cost_history
+                       WHERE (sku, date_from) IN (SELECT sku, MAX(date_from)
+                                                  FROM product_cost_history GROUP BY sku)) c
+              ON a.sku = c.sku
+            WHERE a.accrued_category = 'POSTING' AND a.sale_price > 0
+              AND substr(a.date, 1, 7) = ?
+        """, (month,)).fetchone()
+        cogs = f(r_est[0])
+        cogs_estimated = cogs > 0
+
     con.close()
 
     revenue = sale_price + bonus + coinv
-    ads = abs(cats.get("Реклама PPC", 0))
-    services_no_ads = sum(abs(v) for k, v in cats.items()
-                       if k not in ("Реклама PPC", "ItemCompensation"))
-    expenses_no_ads = commission + services_no_ads - abs(cats.get("ItemCompensation", 0))
-    margin = revenue - expenses_no_ads - ads - cogs
-    tax_base = revenue - bonus
-    tax = tax_base * tax_rate
-    net = margin - tax
+    # Услуги со знаком: расходы отрицательные, компенсации/корректировки положительные.
+    # Раньше брался abs() по каждой категории, и, например, корректировка +332,67
+    # за октябрь считалась расходом (Δ 665 ₽ с ЛК).
+    services_signed = sum(cats.values())
+    ads = -cats.get("Реклама PPC", 0)
+    expenses_total = commission - services_signed          # = ЛК «Расходы», Точка
+    expenses_no_ads = expenses_total - ads
+    margin = revenue - expenses_total - cogs               # валовая прибыль
+    contrib = FIXED_CONTRIB_YEAR / 12.0                    # взносы ИП, 1/12 в месяц
+    # УСН «доходы − расходы»: база = доходы − все расходы − себестоимость − взносы;
+    # минимальный налог 1% от доходов. Помесячно — оценка, итог года — лист «Налоги».
+    tax_base = margin - contrib
+    tax = max(tax_base * tax_rate, revenue * MIN_TAX_RATE) if revenue > 0 else 0.0
+    net = margin - contrib - tax
     roi = (net / cogs * 100) if cogs else 0
 
     return {
@@ -327,9 +372,10 @@ def get_pnl_for_month(month, tax_rate):
         "agents": cats.get("Услуги агентов", 0),
         "fbo": cats.get("Услуги FBO", 0),
         "other": cats.get("Другие услуги", 0),
-        "misc": cats.get("Прочие", 0), "ads": ads,
+        "misc": cats.get("Прочие", 0) + cats.get("ItemCompensation", 0), "ads": ads,
         "expenses_no_ads": expenses_no_ads,
-        "expenses_total": expenses_no_ads + ads,
+        "expenses_total": expenses_total,
+        "contrib": contrib, "cogs_estimated": cogs_estimated, "is_open_month": is_open_month,
         "margin": margin, "tax_base": tax_base, "tax": tax, "net": net, "roi": roi,
     }
 
@@ -386,15 +432,36 @@ def add_calc_formulas(rows):
         rows[35][idx] = f"=SUM({c}37:{c}40)"
     year_sum(35); quarter_sums(35)
 
+    # Операционные расходы в листе со знаком минус → EBITDA = валовая + опер. расходы
+    # (раньше стояло «−», и взносы увеличивали прибыль).
     for idx in range(1, 19):
         col = col_letter(idx + 1)
-        rows[41][idx] = f"={col}34-{col}36"
+        rows[41][idx] = f"={col}34+{col}36"
     for idx in range(1, 19):
         col = col_letter(idx + 1)
         rows[45][idx] = f"={col}42+{col}44"
     for idx in range(1, 19):
         col = col_letter(idx + 1)
         rows[46][idx] = f"=IF({col}32=0;0;-{col}46/{col}32*100)"
+
+    # Строка 49 «Нераспределённая прибыль» = чистая прибыль + дивиденды (формулой,
+    # чтобы учитывались ручные операционные расходы). Строка 50 «Накопленная прибыль»
+    # — нарастающим итогом с января (раньше дублировала строку 49).
+    for m in range(1, 13):
+        col = col_letter(COL_MONTH_1 + m - 1)
+        idx = COL_MONTH_1 + m - 1 - 1
+        rows[48][idx] = f"={col}46+{col}48"
+        rows[49][idx] = f"=SUM($D$49:{col}49)"
+    rows[49][COL_YEAR - 1] = "=B49"
+
+    # Колонка C («% от базы») для расчётных строк — всегда от годовых доходов B5,
+    # а не сумма/разность процентов соседних строк.
+    for r in (36, 42, 46, 49, 50):
+        rows[r - 1][COL_PCT - 1] = f"=IF($B$5=0;0;B{r}/$B$5*100)"
+    rows[46][COL_PCT - 1] = "=B47"   # ROI — тот же процент, что в B
+    for q in range(1, 5):
+        cB = col_letter(COL_MONTH_1 + q * 3 - 1)
+        rows[49][COL_Q1 + q - 1 - 1] = f"=SUM($D$49:{cB}49)"
 
 
 def build_table(year, tax_rate):
@@ -421,6 +488,10 @@ def build_table(year, tax_rate):
     row2[2] = "% от базы"
     for i, name in enumerate(MONTHS):
         row2[mcol(i + 1) - 1] = name
+    # Месяц без отчёта о реализации (текущий) помечаем — цифры по нему предварительные
+    for m_str, data in by_month.items():
+        if data.get("cogs_estimated") or data.get("is_open_month"):
+            row2[mcol(int(m_str.split("-")[1])) - 1] = MONTHS[int(m_str.split("-")[1]) - 1] + " (идёт)"
     for i, name in enumerate(QUARTERS):
         row2[qcol(i + 1) - 1] = name
     row2[19] = "выводы"
@@ -454,9 +525,9 @@ def build_table(year, tax_rate):
         ("  Услуги агентов (эквайринг и пр.)", "agents"),
         ("  Услуги FBO", "fbo"),
         ("  Другие услуги", "other"),
-        ("  Прочие начисления", "misc"),
+        ("  Прочие начисления и компенсации", "misc"),
         ("", None),
-        ("  Себестоимость с учётом возвратов", "cogs"),
+        ("  Себестоимость (доставлено − возвращено)", "cogs"),
         ("", None),
         ("ВАЛОВАЯ ПРИБЫЛЬ", "margin"),
         ("", None),
@@ -464,24 +535,22 @@ def build_table(year, tax_rate):
         ("  - расходы на персонал", None),
         ("  - административные расходы", None),
         ("  - коммерческие расходы", None),
-        ("  - прочие операционные расходы", None),
+        ("  - прочие операционные (взносы ИП, 1/12)", "contrib"),
         ("", None),
         ("ОПЕРАЦИОННАЯ ПРИБЫЛЬ (EBITDA)", "margin"),
         ("", None),
-        (f"Налоги (УСН {tax_rate*100:.0f}%)", "tax"),
+        (f"Налог УСН Д−Р {tax_rate*100:.0f}% (мин. 1% от доходов)", "tax"),
         ("", None),
         ("ЧИСТАЯ ПРИБЫЛЬ", "net"),
-        ("Рентабельность (ROI)", "roi"),
+        ("Рентабельность к себестоимости (ROI)", "roi"),
         ("Выплата дивидендов", None),
         ("Нераспределённая прибыль", "net"),
         ("Накопленная прибыль", "net"),
     ]
 
-    NEGATIVE = {"expenses_total", "expenses_no_ads", "cogs", "commission",
-                "fulfil_total", "fulfil_logistics", "fulfil_reverse",
-                "fulfil_lastmile", "fulfil_processing", "reviews",
-                "ppc", "promo", "stars", "brand", "market_total",
-                "agents", "fbo", "other", "misc", "tax"}
+    # Эти ключи — всегда расход, пишем со знаком минус. Категории услуг Ozon
+    # уже со знаком из accruals_services (компенсации — плюсом), их не трогаем.
+    NEGATIVE = {"expenses_total", "expenses_no_ads", "cogs", "commission", "tax", "contrib"}
 
     base_year = sum(d.get("revenue", 0) for d in by_month.values())
 
@@ -534,14 +603,20 @@ def apply_format(ws, n_rows):
 def read_operational(ws):
     """Читает ручной ввод из колонок C:N (месяцы) строк 37-40."""
     saved = {}
-    for r in (37, 38, 39, 40):
+    # Строка 40 (взносы ИП) теперь заполняется скриптом — не сохраняем.
+    for r in (37, 38, 39):
         try:
             row = ws.row_values(r, value_render_option="UNFORMATTED_VALUE")
             for idx in range(3, 15):
                 if idx < len(row):
                     v = row[idx]
-                    if v is not None and str(v).strip() not in ("", "0"):
-                        saved[f"{col_letter(idx+1)}{r}"] = v
+                    if v is None or str(v).strip() in ("", "0"):
+                        continue
+                    try:
+                        float(str(v).replace(" ", "").replace("\xa0", "").replace(",", "."))
+                    except ValueError:
+                        continue  # мусор вроде «%» не восстанавливаем
+                    saved[f"{col_letter(idx+1)}{r}"] = v
         except Exception:
             pass
     return saved

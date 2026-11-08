@@ -3,6 +3,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 from .db import connect
+from .finance_core import ozon_pnl, year_range, receivables as calc_receivables, inventory_value
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRED = os.path.join(APP_DIR, "app", "credentials.json")
@@ -37,49 +38,18 @@ def build(sh):
     conn = connect()
     cur = conn.cursor()
 
-    # 1. Выручка YTD
-    cur.execute("SELECT COALESCE(SUM(sale_price), 0) FROM accruals WHERE date LIKE ?", (f"{year}-%",))
-    revenue = cur.fetchone()[0]
-    cur.execute("SELECT COALESCE(SUM(bonus), 0) FROM accruals WHERE date LIKE ?", (f"{year}-%",))
-    bonus = cur.fetchone()[0]
-    cur.execute("SELECT COALESCE(SUM(coinvestment), 0) FROM accruals WHERE date LIKE ?", (f"{year}-%",))
-    coinv = cur.fetchone()[0]
+    # 1–2. Выручка и себестоимость YTD, расходы Ozon — единая формула finance_core (с комиссией)
+    p = ozon_pnl(cur, *year_range(year))
+    revenue = p["income"]          # валовые доходы (цена + баллы + партнёры)
+    bonus = coinv = 0.0            # уже внутри revenue
+    cogs = p["cogs"]
+    ozon_expenses = p["ozon_total"]
 
-    # 2. Себестоимость YTD (COGS)
-    cur.execute("""
-        SELECT SUM(m.quantity * c.cost_price)
-        FROM monthly_realization_rows m
-        LEFT JOIN (
-            SELECT sku, date_from, cost_price FROM product_cost_history
-            WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)
-        ) c ON m.sku = c.sku
-        WHERE m.month LIKE ? AND m.is_return = 0
-    """, (f"{year}-%",))
-    cogs = cur.fetchone()[0] or 0.0
+    # 3. Текущий запас (Inventory) — как в Балансе
+    inventory = inventory_value(cur)
 
-    # 3. Текущий запас (Inventory)
-    cur.execute("SELECT MAX(date) FROM stock_daily")
-    last_date = cur.fetchone()[0]
-    inventory = 0.0
-    if last_date:
-        cur.execute("""
-            SELECT SUM((s.fbo_present + s.fbs_present) * c.cost_price)
-            FROM stock_daily s
-            JOIN product_cost_history c ON s.sku = c.sku
-            WHERE s.date = ? AND c.date_from = (SELECT MAX(date_from) FROM product_cost_history WHERE sku = s.sku AND date_from <= ?)
-        """, (last_date, last_date))
-        inventory = cur.fetchone()[0] or 0.0
-
-    # 4. Дебиторка (Receivables)
-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_transactions")
-    acc = cur.fetchone()[0]
-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_payouts")
-    pay = cur.fetchone()[0]
-    receivables = acc - pay
-
-    # 5. Расходы Ozon YTD
-    cur.execute("SELECT COALESCE(SUM(ABS(amount)), 0) FROM finance_transactions WHERE type = 'deduction' AND date LIKE ?", (f"{year}-%",))
-    ozon_expenses = cur.fetchone()[0]
+    # 4. Дебиторка — фактический баланс Ozon
+    receivables = calc_receivables(cur)
 
     conn.close()
 
@@ -106,6 +76,9 @@ def build(sh):
     roi = (net_profit / total_capital * 100) if total_capital > 0 else 0
     turnover = revenue / total_capital if total_capital > 0 else 0
 
+    _r = lambda v: round(float(v), 2)
+    revenue, cogs, inventory, receivables, cash, ap = map(_r, (revenue, cogs, inventory, receivables, cash, ap))
+    total_capital, net_profit, dio, dso, dpo, ccc, roi, turnover = map(_r, (total_capital, net_profit, dio, dso, dpo, ccc, roi, turnover))
     return {
         'revenue': revenue, 'cogs': cogs, 'inventory': inventory,
         'receivables': receivables, 'cash': cash, 'ap': ap,
@@ -148,7 +121,7 @@ def main():
         ["CCC (DIO + DSO - DPO)", data['ccc'], "Чем меньше, тем лучше"],
         ["", "", ""],
         ["ЭФФЕКТИВНОСТЬ", "", ""],
-        ["Прибыль (Выручка - COGS - Расходы Ozon)", data['net_profit'], "Упрощенный расчет"],
+        ["Валовая прибыль (Доходы − все расходы Ozon, вкл. комиссию − COGS)", data['net_profit'], "Сверено с P&L"],
         ["ROI (Прибыль / Капитал)", f"{data['roi']:.2f}%", "Отдача на вложенный капитал"],
         ["Оборачиваемость капитала", f"{data['turnover']:.2f}", "Выручка на 1 руб. капитала"]
     ], range_name="A3")

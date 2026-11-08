@@ -8,6 +8,7 @@ import calendar
 from .db import connect
 from . import report_layout as rl
 from .calc_taxes import build as build_taxes
+from .finance_core import receivables as calc_receivables, inventory_value, tax_rate_pct
 from . import calc_funnel
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -280,14 +281,11 @@ def build(sh):
         non_liquid = cur.fetchone()[0] or 0.0
 
     # --- 4. ДЕБИТОРКА ---
-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_transactions")
-    acc = cur.fetchone()[0]
-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_payouts")
-    pay = cur.fetchone()[0]
-    receivables = acc - pay
+    receivables = calc_receivables(cur)       # фактический баланс Ozon
+    stock_capital = inventory_value(cur)      # весь товар на складах × себестоимость (как в Балансе)
     conn.close()
 
-    tax_data = build_taxes(2026)
+    tax_data = build_taxes(2026, tax_rate_pct(sh))
     total_burden = tax_data["tax_to_pay"] + tax_data["total_contrib"]
     cash = get_manual_inputs(sh)
     cash_gap = 0.0
@@ -389,7 +387,7 @@ def build(sh):
 
     return {
         "period": period, "data": data, "profits": profits, "capitals": capitals,
-        "total_profit": total_profit, "total_capital": total_capital,
+        "total_profit": total_profit, "total_capital": total_capital, "stock_capital": stock_capital,
         "low_hist": low_hist, "episodic": episodic,
         "actions": actions, "funnel_plan": funnel_plan,
         "funnel_total_imp": total_imp, "funnel_total_ord": total_ord,
@@ -481,7 +479,7 @@ def main():
         f"C: {sum(res['data']['C'].values())} SKU = {c_share}% прибыли",
         f"Мало истории: {res['low_hist']}",
         f"Эпизодический: {res['episodic']}",
-        f"Капитал в товаре: {res['total_capital']:,.0f} ₽",
+        f"Капитал в товаре: {res['stock_capital']:,.0f} ₽ (в т.ч. по продающимся SKU: {res['total_capital']:,.0f} ₽)",
     ]:
         values.append([line, "", "", "", ""])
     values.append(["", "", "", "", ""])

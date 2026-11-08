@@ -123,33 +123,13 @@ def calc_fact(month_str):
     conn = connect()
     cur = conn.cursor()
 
-    # === Выручка и COGS из accruals (ежедневные начисления) ===
-    # Выручка из accruals
-    cur.execute("""
-        SELECT COALESCE(SUM(sale_price + bonus + coinvestment), 0) AS rev
-        FROM accruals
-        WHERE date >= ? AND date < ?
-    """, (d_from, d_to))
-    revenue_all = cur.fetchone()[0] or 0
-
-    # COGS из realization_daily (только для закрытых месяцев)
-    cur.execute("""
-        SELECT COALESCE(SUM(r.quantity * c.cost_price), 0) AS cogs
-        FROM realization_daily r
-        LEFT JOIN (
-            SELECT sku, cost_price FROM product_cost_history
-            WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)
-        ) c ON r.sku = c.sku
-        WHERE r.date >= ? AND r.date < ? AND r.is_return = 0
-    """, (d_from, d_to))
-    cogs_all = cur.fetchone()[0] or 0
-
-    # === Расходы Ozon из finance_transactions (удержания) ===
-    cur.execute("""
-        SELECT COALESCE(SUM(ABS(amount)), 0) FROM finance_transactions
-        WHERE type = 'deduction' AND date >= ? AND date < ?
-    """, (d_from, d_to))
-    ozon_exp = cur.fetchone()[0] or 0
+    # === Выручка, COGS, расходы Ozon — единая формула finance_core (с комиссией) ===
+    from .finance_core import ozon_pnl
+    _p = ozon_pnl(cur, d_from, d_to)
+    revenue_all = _p["income"]
+    cogs_all = _p["cogs"]
+    ozon_exp = _p["ozon_total"]
+    cogs_missing = _p["cogs_missing"]
 
     profit = revenue_all - cogs_all - ozon_exp
 
@@ -322,7 +302,11 @@ def write_kpi(sh, month_str, plan_total, fact):
         if plan_val is None:
             values.append([name, "—", round(fact_val, 2), "—", "—", "—", "—"])
             continue
-        forecast_val = forecast_month(fact_val, fact["days_passed"], fact["days_in_month"])
+        # Доли и проценты (маржа, ДРР, конверсия, выкупаемость, CCC, AOV) не экстраполируются на месяц
+        if unit in ("%", "дн", "дней") or key in ("aov", "ccc"):
+            forecast_val = fact_val
+        else:
+            forecast_val = forecast_month(fact_val, fact["days_passed"], fact["days_in_month"])
         delta_abs = fact_val - plan_val
         delta_pct = (delta_abs / plan_val * 100) if plan_val != 0 else 0
         status = status_for(forecast_val, plan_val, direction)
