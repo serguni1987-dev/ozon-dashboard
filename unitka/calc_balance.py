@@ -2,7 +2,7 @@ import os
 import gspread
 from google.oauth2.service_account import Credentials
 from .db import connect
-from .finance_core import receivables as calc_receivables, inventory_value, tax_rate_pct
+from .finance_core import receivables as calc_receivables, inventory_value, tax_settings
 from .calc_taxes import build as build_taxes
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -40,7 +40,7 @@ def get_manual_inputs(sh):
         print(f"Ошибка чтения Ручной ввод: {e}")
     return cash, ap, tax_paid
 
-def build(tax_paid, rate_pct=None):
+def build(tax_paid, settings=None):
     conn = connect()
     cur = conn.cursor()
     inventory = inventory_value(cur)          # остатки × себестоимость — как в Оборотном капитале и Пульте
@@ -48,9 +48,10 @@ def build(tax_paid, rate_pct=None):
     conn.close()
 
     # Налог к уплате — из единого расчёта calc_taxes (УСН Д−Р, минимальный 1% при убытке), минус уже уплаченное
-    tax_data = build_taxes(2026, rate_pct)
+    tax_data = build_taxes(2026, **(settings or {}))
     tax_to_pay = max(0.0, tax_data['tax_to_pay'] - tax_paid)
-    return inventory, receivables, tax_to_pay, tax_data['rate_pct']
+    label = f"УСН Д−Р {tax_data['rate_pct']:.0f}%, минимум 1%" if tax_data['regime'] == 'Д-Р' else f"УСН доходы {tax_data['rate_pct']:.0f}% минус взносы"
+    return inventory, receivables, tax_to_pay, label
 
 def main():
     creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)
@@ -58,7 +59,7 @@ def main():
     sh = client.open_by_key(SHEET_ID)
     
     cash, ap, tax_paid = get_manual_inputs(sh)
-    inventory, receivables, tax_to_pay, rate = build(tax_paid, tax_rate_pct(sh))
+    inventory, receivables, tax_to_pay, rate = build(tax_paid, tax_settings(sh))
     
     assets = inventory + receivables + cash
     liabilities = tax_to_pay + ap
@@ -87,7 +88,7 @@ def main():
         ["ИТОГО АКТИВЫ", assets],
         ["", ""],
         ["ПАССИВЫ", "Сумма"],
-        [f"Налоги к уплате (УСН Д−Р {rate:.0f}%, минимум 1%)", tax_to_pay],
+        [f"Налоги к уплате ({rate})", tax_to_pay],
         ["Кредиторка поставщикам", ap],
         ["ИТОГО ПАССИВЫ", liabilities],
         ["", ""],

@@ -30,7 +30,21 @@ DEFAULT_TAX_RATE = 0.05
 MIN_TAX_RATE = 0.01            # минимальный налог УСН Д−Р — 1% от доходов
 FIXED_CONTRIB_YEAR = 57390.0   # фиксированные взносы ИП за 2026 (ст. 430 НК; 2025 было 53 658), делятся на 12 месяцев
 SETTINGS_SHEET = "НАСТРОЙКИ"
-SETTINGS_CELL = "B1"
+SETTINGS_CELL = "B1"           # ставка, %
+SETTINGS_REGIME = "B4"         # режим: «доходы − расходы» (Д-Р) или «доходы»
+SETTINGS_CONTRIB = "B5"        # взносы ИП за год, ₽
+REGIME_DR, REGIME_INCOME = "Д-Р", "Доходы"
+
+
+def parse_regime(raw):
+    t = str(raw or "").lower().replace("−", "-").replace("–", "-").replace(" ", "")
+    if not t:
+        return REGIME_DR
+    if "расход" in t or "д-р" in t or t in ("др", "15", "15%"):
+        return REGIME_DR
+    if "доход" in t or t in ("6", "6%", "д"):
+        return REGIME_INCOME
+    return REGIME_DR
 
 _sync = open(os.path.join(APP_DIR, "sheets_sync.py"), encoding="utf-8").read()
 SHEET_ID = re.search(r'SHEET_ID\s*=\s*"([^"]+)"', _sync).group(1)
@@ -128,23 +142,30 @@ MONTHS = ["янв", "фев", "мар", "апр", "май", "июн",
 QUARTERS = ["1 кв", "2 кв", "3 кв", "4 кв"]
 
 
-def get_tax_rate(sh):
+def get_tax_settings(sh):
+    """{rate, regime, contrib} из листа НАСТРОЙКИ (B1, B4, B5). Нет листа/ячейки → значения по умолчанию."""
+    st = {"rate": DEFAULT_TAX_RATE, "regime": REGIME_DR, "contrib": FIXED_CONTRIB_YEAR}
     try:
         ws = sh.worksheet(SETTINGS_SHEET)
-        raw = ws.acell(SETTINGS_CELL).value
-        if raw is None or str(raw).strip() == "":
+        vals = ws.batch_get([SETTINGS_CELL, SETTINGS_REGIME, SETTINGS_CONTRIB])
+        cell = lambda i: (vals[i][0][0] if vals[i] and vals[i][0] else "")  # noqa: E731
+        raw = str(cell(0)).replace("%", "").replace(",", ".").strip()
+        if raw:
+            st["rate"] = float(raw) / 100.0
+            print(f"[OK] Ставка налога из {SETTINGS_SHEET}!{SETTINGS_CELL}: {float(raw)}%")
+        else:
             print(f"[i] {SETTINGS_SHEET}!{SETTINGS_CELL} пусто → {DEFAULT_TAX_RATE*100:.0f}%")
-            return DEFAULT_TAX_RATE
-        rate_pct = float(str(raw).replace("%", "").replace(",", ".").strip())
-        rate = rate_pct / 100.0
-        print(f"[OK] Ставка налога из {SETTINGS_SHEET}!{SETTINGS_CELL}: {rate_pct}%")
-        return rate
+        st["regime"] = parse_regime(cell(1))
+        print(f"[OK] Режим УСН из {SETTINGS_SHEET}!{SETTINGS_REGIME}: «{cell(1) or 'не задан'}» → {st['regime']}")
+        raw = str(cell(2)).replace("₽", "").replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
+        if raw:
+            st["contrib"] = float(raw)
+        print(f"[OK] Взносы ИП за год: {st['contrib']:,.0f} ₽")
     except gspread.WorksheetNotFound:
-        print(f"[!] Листа {SETTINGS_SHEET} нет → {DEFAULT_TAX_RATE*100:.0f}%")
-        return DEFAULT_TAX_RATE
+        print(f"[!] Листа {SETTINGS_SHEET} нет → {DEFAULT_TAX_RATE*100:.0f}%, Д-Р, {FIXED_CONTRIB_YEAR:,.0f}")
     except Exception as e:
-        print(f"[!] Не прочитал ставку ({e}) → {DEFAULT_TAX_RATE*100:.0f}%")
-        return DEFAULT_TAX_RATE
+        print(f"[!] Не прочитал {SETTINGS_SHEET} ({e}) → {DEFAULT_TAX_RATE*100:.0f}%, Д-Р, {FIXED_CONTRIB_YEAR:,.0f}")
+    return st
 
 
 def make_verdict(label, pct_signed):
@@ -220,7 +241,8 @@ def f(v):
         return 0.0
 
 
-def get_pnl_for_month(month, tax_rate):
+def get_pnl_for_month(month, tax):
+    tax_rate, regime, contrib_year = tax["rate"], tax["regime"], tax["contrib"]
     y, m = month.split("-")
     y, m = int(y), int(m)
     ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
@@ -343,11 +365,17 @@ def get_pnl_for_month(month, tax_rate):
     expenses_total = commission - services_signed          # = ЛК «Расходы», Точка
     expenses_no_ads = expenses_total - ads
     margin = revenue - expenses_total - cogs               # валовая прибыль
-    contrib = FIXED_CONTRIB_YEAR / 12.0                    # взносы ИП, 1/12 в месяц
-    # УСН «доходы − расходы»: база = доходы − все расходы − себестоимость − взносы;
-    # минимальный налог 1% от доходов. Помесячно — оценка, итог года — лист «Налоги».
-    tax_base = margin - contrib
-    tax = max(tax_base * tax_rate, revenue * MIN_TAX_RATE) if revenue > 0 else 0.0
+    contrib = contrib_year / 12.0                          # взносы ИП, 1/12 в месяц
+    # Режим из НАСТРОЙКИ!B4. Помесячно — оценка, итог года — лист «Налоги».
+    if regime == REGIME_INCOME:
+        # УСН «доходы»: ставка × доходы, минус взносы ИП (ИП без работников — до нуля)
+        tax_base = revenue
+        tax = max(0.0, revenue * tax_rate - contrib) if revenue > 0 else 0.0
+    else:
+        # УСН «доходы − расходы»: база = доходы − все расходы − себестоимость − взносы;
+        # минимальный налог 1% от доходов.
+        tax_base = margin - contrib
+        tax = max(tax_base * tax_rate, revenue * MIN_TAX_RATE) if revenue > 0 else 0.0
     net = margin - contrib - tax
     roi = (net / cogs * 100) if cogs else 0
 
@@ -464,9 +492,10 @@ def add_calc_formulas(rows):
         rows[49][COL_Q1 + q - 1 - 1] = f"=SUM($D$49:{cB}49)"
 
 
-def build_table(year, tax_rate):
+def build_table(year, tax):
+    tax_rate, regime = tax["rate"], tax["regime"]
     all_months = [m for m in get_all_months() if m.startswith(str(year))]
-    by_month = {m: get_pnl_for_month(m, tax_rate) for m in all_months}
+    by_month = {m: get_pnl_for_month(m, tax) for m in all_months}
 
     COL_YEAR = 2
     COL_PCT = 3
@@ -539,7 +568,8 @@ def build_table(year, tax_rate):
         ("", None),
         ("ОПЕРАЦИОННАЯ ПРИБЫЛЬ (EBITDA)", "margin"),
         ("", None),
-        (f"Налог УСН Д−Р {tax_rate*100:.0f}% (мин. 1% от доходов)", "tax"),
+        ((f"Налог УСН Д−Р {tax_rate*100:.0f}% (мин. 1% от доходов)" if regime == REGIME_DR
+          else f"Налог УСН доходы {tax_rate*100:.0f}% (минус взносы ИП)"), "tax"),
         ("", None),
         ("ЧИСТАЯ ПРИБЫЛЬ", "net"),
         ("Рентабельность к себестоимости (ROI)", "roi"),
@@ -652,9 +682,9 @@ def main():
     client = gspread.authorize(creds)
     sh = client.open_by_key(SHEET_ID)
 
-    tax_rate = get_tax_rate(sh)
+    tax = get_tax_settings(sh)
 
-    rows = build_table(year, tax_rate)
+    rows = build_table(year, tax)
     print(f"\nСтрок: {len(rows)}")
 
     if local:

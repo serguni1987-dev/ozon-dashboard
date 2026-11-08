@@ -8,7 +8,7 @@ import calendar
 from .db import connect
 from . import report_layout as rl
 from .calc_taxes import build as build_taxes
-from .finance_core import receivables as calc_receivables, inventory_value, tax_rate_pct
+from .finance_core import receivables as calc_receivables, inventory_value, tax_settings
 from . import calc_funnel
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -285,7 +285,7 @@ def build(sh):
     stock_capital = inventory_value(cur)      # весь товар на складах × себестоимость (как в Балансе)
     conn.close()
 
-    tax_data = build_taxes(2026, tax_rate_pct(sh))
+    tax_data = build_taxes(2026, **tax_settings(sh))
     total_burden = tax_data["tax_to_pay"] + tax_data["total_contrib"]
     cash = get_manual_inputs(sh)
     cash_gap = 0.0

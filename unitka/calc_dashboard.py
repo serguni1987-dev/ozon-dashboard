@@ -4,7 +4,7 @@ from google.oauth2.service_account import Credentials
 from datetime import datetime, timedelta
 from .db import connect
 from .calc_taxes import build as build_taxes
-from .finance_core import ozon_pnl, month_range, year_range, receivables as calc_receivables, tax_rate_pct
+from .finance_core import ozon_pnl, month_range, year_range, receivables as calc_receivables, tax_settings
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRED = os.path.join(APP_DIR, "app", "credentials.json")
@@ -36,7 +36,7 @@ def main():
 
     cash, ap = get_manual_inputs(sh)
     
-    tax_data = build_taxes(2026, tax_rate_pct(sh))
+    tax_data = build_taxes(2026, **tax_settings(sh))
     real_tax = tax_data['tax_to_pay']
     total_contrib = tax_data['total_contrib']
     total_burden = real_tax + total_contrib
@@ -142,7 +142,7 @@ def main():
 
     # Итог года — чтобы месяц не скрывал годовой результат
     if ytd_stats['profit'] < 0:
-        recommendations.append(("🔴 ГОД В УБЫТКЕ", f"Валовая прибыль {now.year} YTD: {ytd_stats['profit']:,.0f} руб. (маржа {ytd_stats['margin']:.1f}%). Налог — минимальный 1%: {real_tax:,.0f} руб."))
+        recommendations.append(("🔴 ГОД В УБЫТКЕ", f"Валовая прибыль {now.year} YTD: {ytd_stats['profit']:,.0f} руб. (маржа {ytd_stats['margin']:.1f}%). Налог к уплате: {real_tax:,.0f} руб." + (" (минимальный 1%)" if tax_data.get("min_tax", 0) >= tax_data.get("tax_rate", 0) and tax_data.get("regime") == "Д-Р" else "")))
     else:
         recommendations.append(("🟢 Год прибыльный", f"Валовая прибыль {now.year} YTD: {ytd_stats['profit']:,.0f} руб. (маржа {ytd_stats['margin']:.1f}%). Налог: {real_tax:,.0f} руб."))
 

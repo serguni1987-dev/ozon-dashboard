@@ -205,19 +205,57 @@ def inventory_value(cur) -> float:
         WHERE s.date = ? AND (s.fbo_present + s.fbs_present) > 0""", (row[0],))
 
 
-def tax_rate_pct(sh=None) -> float:
-    """Ставка налога, %: НАСТРОЙКИ!B1 → иначе DEFAULT_TAX_RATE_PCT."""
+REGIME_DR = "Д-Р"          # УСН «доходы − расходы»: налог = ставка × (Д − Р), минимум 1 % от доходов
+REGIME_INCOME = "Доходы"   # УСН «доходы»: налог = ставка × доходы − взносы ИП (ИП без работников — до нуля)
+DEFAULT_REGIME = REGIME_DR
+DEFAULT_CONTRIB = 57390.0  # фиксированные взносы ИП за 2026 (ст. 430 НК; 2025 — 53 658)
+
+# Лист НАСТРОЙКИ: B1 — ставка %, B4 — режим («доходы − расходы» / «доходы»), B5 — взносы ИП за год
+SETTINGS_SHEET = "НАСТРОЙКИ"
+SETTINGS_RATE, SETTINGS_REGIME, SETTINGS_CONTRIB = "B1", "B4", "B5"
+
+
+def parse_regime(raw) -> str:
+    """«доходы − расходы», «Д-Р», «15%» → Д-Р; «доходы», «6%» → Доходы; иначе DEFAULT_REGIME."""
+    t = str(raw or "").lower().replace("−", "-").replace("–", "-").replace(" ", "")
+    if not t:
+        return DEFAULT_REGIME
+    if "расход" in t or "д-р" in t or t in ("др", "15", "15%", "усн15"):
+        return REGIME_DR
+    if "доход" in t or t in ("6", "6%", "усн6", "д"):
+        return REGIME_INCOME
+    return DEFAULT_REGIME
+
+
+def tax_settings(sh=None) -> dict:
+    """Налоговые настройки из листа НАСТРОЙКИ: {rate_pct, regime, contrib}.
+    Без доступа к таблице — значения по умолчанию (5 %, Д-Р, 57 390)."""
+    out = {"rate_pct": DEFAULT_TAX_RATE_PCT, "regime": DEFAULT_REGIME, "contrib": DEFAULT_CONTRIB}
     if sh is None:
-        return DEFAULT_TAX_RATE_PCT
+        return out
     try:
-        ws = sh.worksheet("НАСТРОЙКИ")
-        raw = (ws.acell("B1").value or "").replace("%", "").replace(",", ".").strip()
-        val = float(raw)
-        if 0 < val < 100:
-            return val
+        ws = sh.worksheet(SETTINGS_SHEET)
+        vals = ws.batch_get([SETTINGS_RATE, SETTINGS_REGIME, SETTINGS_CONTRIB])
+        cell = lambda i: (vals[i][0][0] if vals[i] and vals[i][0] else "")  # noqa: E731
+        raw = str(cell(0)).replace("%", "").replace(",", ".").strip()
+        if raw:
+            val = float(raw)
+            if 0 < val < 100:
+                out["rate_pct"] = val
+        out["regime"] = parse_regime(cell(1))
+        raw = str(cell(2)).replace("₽", "").replace(" ", "").replace("\xa0", "").replace(",", ".").strip()
+        if raw:
+            val = float(raw)
+            if val >= 0:
+                out["contrib"] = val
     except Exception as exc:  # noqa: BLE001
-        log.warning("НАСТРОЙКИ!B1 не прочитана (%s) — ставка %.1f%%", exc, DEFAULT_TAX_RATE_PCT)
-    return DEFAULT_TAX_RATE_PCT
+        log.warning("Лист НАСТРОЙКИ не прочитан (%s) — по умолчанию %s", exc, out)
+    return out
+
+
+def tax_rate_pct(sh=None) -> float:
+    """Ставка налога, % (совместимость): НАСТРОЙКИ!B1 → иначе DEFAULT_TAX_RATE_PCT."""
+    return tax_settings(sh)["rate_pct"]
 
 
 if __name__ == "__main__":
