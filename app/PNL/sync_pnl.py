@@ -1,5 +1,11 @@
 ﻿"""
 sync_pnl.py - лист P&L: год по месяцам.
+
+Ставка налога читается из листа НАСТРОЙКИ, ячейка B1.
+Если лист/ячейка недоступны → DEFAULT_TAX_RATE.
+
+COGS: через monthly_realization_rows (is_return=0 − is_return=1) × cost_price.
+Заказы: из orders_created (FBS+FBO, по дате создания).
 """
 import os
 import re
@@ -12,49 +18,129 @@ from google.oauth2.service_account import Credentials
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DB = os.path.join(APP_DIR, "ozon.db")
 CREDENTIALS = os.path.join(APP_DIR, "credentials.json")
-TAX_RATE = 0.15
+
+DEFAULT_TAX_RATE = 0.15
+SETTINGS_SHEET = "НАСТРОЙКИ"
+SETTINGS_CELL = "B1"
 
 _sync = open(os.path.join(APP_DIR, "sheets_sync.py"), encoding="utf-8").read()
 SHEET_ID = re.search(r'SHEET_ID\s*=\s*"([^"]+)"', _sync).group(1)
 
+
 CATEGORY_MAP = {
-    # фулфилмент (Ozon «Услуги доставки»)
-    32: "Логистика", 59: "Логистика", 98: "Логистика",
-    16: "Логистика", 17: "Логистика",
-    38: "Обработка, сборка", 39: "Обработка, сборка",
-    # агенты (Ozon «Услуги партнёров»)
-    1:  "Услуги агентов", 74: "Услуги агентов",
-    79: "Услуги агентов", 29: "Услуги агентов",
-    45: "Услуги агентов",
-    # FBO (Ozon «Услуги FBO»)
-    46: "Услуги FBO", 71: "Услуги FBO", 76: "Услуги FBO", 12: "Услуги FBO",
-    # маркетинг (Ozon «Продвижение и реклама»)
-    41: "Реклама PPC", 54: "Продвижение", 3: "Бренд-комиссия",
-    47: "Отзывы", 96: "Отзывы",
-    22: "Реклама PPC", 52: "Реклама PPC",
-    # другие услуги и штрафы
-    14: "Другие услуги", 15: "Другие услуги", 18: "Другие услуги",
-    20: "Другие услуги", 78: "Другие услуги",
-    48: "Реклама PPC",      # PremiumCashback -> Ozon: Продвижение и реклама
-    93: "Другие услуги", 94: "Другие услуги",
-    # прочие / компенсации
-    25: "ItemCompensation",
-    6: "Прочие", 9: "Прочие", 40: "Прочие",
+    # ═══ УСЛУГИ ДОСТАВКИ (Ozon) → Фулфилмент (наш) ═══
+    # Логистика
+    32: "Логистика",              # Logistic
+    73: "Логистика",              # Shipment
+    # Обработка, сборка
+    16: "Обработка, сборка",      # Drop-Off
+    17: "Обработка, сборка",      # Drop-Off Agent
+    38: "Обработка, сборка",      # PackageCost
+    39: "Обработка, сборка",      # PackingFee
+    84: "Обработка, сборка",      # ItemPacking
+    85: "Обработка, сборка",      # ItemSealing
+    97: "Обработка, сборка",      # PackageUnitProcessing
+    # Обратная логистика
+    59: "Обратная логистика",     # ReturnFlowLogistic
+    71: "Обратная логистика",     # SellerReturns
+    53: "Обратная логистика",     # PreparingToReturn
+    60: "Обратная логистика",     # ReturnStorageInTheWarehouse
+    6:  "Обратная логистика",     # Cancellation
+    9:  "Обратная логистика",     # ClientReturn
+    40: "Обратная логистика",     # PartialReturn
+    # Последняя миля
+    28: "Последняя миля",         # LastMile
+    30: "Последняя миля",         # LastMilePickUpPoint
+    120: "Последняя миля",        # CourierPickUpByOzon
+    121: "Последняя миля",        # CourierPickUpReinvoice
+
+    # ═══ УСЛУГИ ПАРТНЁРОВ (Ozon) → Услуги агентов (наш) ═══
+    1:  "Услуги агентов",         # Acquiring (Эквайринг)
+    18: "Услуги агентов",         # EarlyPayment
+    22: "Услуги агентов",         # Installment (Ozon Рассрочка)
+    26: "Услуги агентов",         # KazakhstanBuyerInstallment
+    29: "Услуги агентов",         # LastMileCourier (Доставка до места выдачи)
+    45: "Услуги агентов",         # PickUpPointReturnAcceptance
+    63: "Услуги агентов",         # RfbsDomesticAgentFee
+    66: "Услуги агентов",         # RfbsGlobalAgentFee
+    68: "Услуги агентов",         # RfbsServiceFee
+    74: "Звёзды",                 # StarsMembership (Звёздные товары)
+    79: "Услуги агентов",         # TemporaryPlacementsAgent
+    98: "Услуги агентов",         # DeliveryToHandoverPlaceByOzon
+
+    # ═══ ПРОДВИЖЕНИЕ И РЕКЛАМА (Ozon) → Маркетинг (наш) ═══
+    41: "Реклама PPC",            # PayPerClick
+    48: "Реклама PPC",            # PremiumCashbackIndividualPoints
+    52: "Продвижение",            # PremiumSubscription
+    54: "Продвижение",            # Promotion
+    3:  "Бренд-комиссия",         # BrandCommission
+    4:  "Бренд-комиссия",         # BrandPromotion
+    5:  "Бренд-комиссия",         # BrandShelf
+    47: "Отзывы",                 # PointsForReviews
+    95: "Отзывы",                 # CustomerReviews
+    96: "Отзывы",                 # AcceleratedReviewCollection
+    70: "Отзывы",                 # SaleReview
+
+    # ═══ УСЛУГИ FBO (Ozon) → Услуги FBO (наш) ═══
+    46: "Услуги FBO",             # Placements (Размещение на складе)
+    76: "Услуги FBO",             # StockInsurance
+    12: "Услуги FBO",             # CrossDock (Кросс-докинг)
+    77: "Услуги FBO",             # SupplyInbound (Обработка товара)
+
+    # ═══ ДРУГИЕ УСЛУГИ И ШТРАФЫ (Ozon) → Другие услуги (наш) ═══
+    14: "Другие услуги",          # DefectRate
+    15: "Другие услуги",          # Disposal
+    20: "Другие услуги",          # FlexiblePayments
+    34: "Другие услуги",          # Marking
+    35: "Другие услуги",          # Moderation
+    89: "Другие услуги",          # DefectFineModeration
+    90: "Другие услуги",          # DefectFineProhibitedGoods
+    91: "Другие услуги",          # DefectFineCounterfeitGoods
+    92: "Другие услуги",          # DefectFineComplaint
+    93: "Другие услуги",          # DefectFineErrors
+    94: "Другие услуги",          # DefectFineShipmentDelayRate
+
+    # ═══ АНАЛИТИКА ═══
+    125: "Аналитика",             # AnalyticsLite
+    126: "Аналитика",             # AnalyticsPremium
+    127: "Аналитика",             # AnalyticsPlus
+    128: "Аналитика",             # AnalyticsPro
+
+    # ═══ ПРОЧИЕ ═══
+    57: "Прочие",                 # RealizationReportCorrection
+    129: "Прочие",                # AnalyticsCorrection
+    78: "Обработка, сборка",      # TemporaryPlacement
+    25: "ItemCompensation",       # ItemCompensation
+    0: "Другие услуги",           # fallback
 }
-
-
-
 
 MONTHS = ["янв", "фев", "мар", "апр", "май", "июн",
           "июл", "авг", "сен", "окт", "ноя", "дек"]
 QUARTERS = ["1 кв", "2 кв", "3 кв", "4 кв"]
 
 
+def get_tax_rate(sh):
+    try:
+        ws = sh.worksheet(SETTINGS_SHEET)
+        raw = ws.acell(SETTINGS_CELL).value
+        if raw is None or str(raw).strip() == "":
+            print(f"[i] {SETTINGS_SHEET}!{SETTINGS_CELL} пусто → {DEFAULT_TAX_RATE*100:.0f}%")
+            return DEFAULT_TAX_RATE
+        rate_pct = float(str(raw).replace("%", "").replace(",", ".").strip())
+        rate = rate_pct / 100.0
+        print(f"[OK] Ставка налога из {SETTINGS_SHEET}!{SETTINGS_CELL}: {rate_pct}%")
+        return rate
+    except gspread.WorksheetNotFound:
+        print(f"[!] Листа {SETTINGS_SHEET} нет → {DEFAULT_TAX_RATE*100:.0f}%")
+        return DEFAULT_TAX_RATE
+    except Exception as e:
+        print(f"[!] Не прочитал ставку ({e}) → {DEFAULT_TAX_RATE*100:.0f}%")
+        return DEFAULT_TAX_RATE
+
+
 def make_verdict(label, pct_signed):
-    """Текстовый вердикт для колонки T."""
     lbl = label.strip().lower()
 
-    # ── родительские суммы ──
     if "фулфилмент" in lbl and ":" in label:
         pct = abs(pct_signed)
         if pct <= 8: return "✓ норма"
@@ -71,7 +157,6 @@ def make_verdict(label, pct_signed):
         if pct <= 75: return "⚠ высоко"
         return "!! критично"
 
-    # ── маржинальные ──
     if "валовая прибыль" in lbl or "чистая прибыль" in lbl or "ebitda" in lbl:
         if pct_signed >= 20: return "✓ норма"
         if pct_signed >= 10: return "⚠ средне"
@@ -80,13 +165,11 @@ def make_verdict(label, pct_signed):
     if "доходы" in lbl and ":" not in label:
         return "✓ база"
 
-    # ── баллы и партнёрские — не расходы ──
     if "баллы" in lbl and "начислено" not in lbl:
         return "✓ компенсация"
     if "программы партнёров" in lbl:
         return "✓ партнёрские"
 
-    # ── расходные ──
     pct = abs(pct_signed)
     if "комиссия" in lbl:
         if pct <= 45: return "✓ норма"
@@ -122,7 +205,7 @@ def f(v):
         return 0.0
 
 
-def get_pnl_for_month(month):
+def get_pnl_for_month(month, tax_rate):
     y, m = month.split("-")
     y, m = int(y), int(m)
     ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
@@ -142,13 +225,34 @@ def get_pnl_for_month(month):
     bonus = f(r["bonus"])
     coinv = f(r["coinv"])
     commission = abs(f(r["comm"]))
+    # 2. Если отчета нет (текущий месяц) — берем данные из ежедневных начислений (accruals)
+    if sale_price == 0 and commission == 0:
+        r_daily = con.execute("""
+            SELECT SUM(sale_price) AS slp,
+                   SUM(sale_commission) AS comm
+            FROM accruals WHERE substr(date, 1, 7) = ?
+        """, (month,)).fetchone()
+        
+        sale_price = f(r_daily["slp"])
+        commission = abs(f(r_daily["comm"]))
+        
+        # Пытаемся достать баллы за скидки
+        r_bonus = con.execute("""
+            SELECT SUM(bonus) AS bonus
+            FROM accruals WHERE substr(date, 1, 7) = ?
+        """, (month,)).fetchone()
+        bonus = f(r_bonus["bonus"]) if r_bonus else 0
 
-    # Заказы
-    r2 = con.execute("""
-        SELECT SUM(orders_units) AS orders FROM sales_daily
-        WHERE date >= ? AND date < ?
-    """, (d1, d2)).fetchone()
-    orders = int(r2["orders"] or 0)
+    # Заказы (справочно) — из orders_created по дате создания (FBS+FBO)
+    try:
+        r2 = con.execute("""
+            SELECT COUNT(*) AS orders FROM orders_created
+            WHERE substr(created_at, 1, 7) = ?
+        """, (month,)).fetchone()
+        orders = int(r2["orders"] or 0)
+    except sqlite3.OperationalError:
+        # таблицы orders_created ещё нет — запусти PNL/_diag/fetch_orders_created.py
+        orders = 0
 
     # Услуги из accruals_services
     cats = {}
@@ -160,31 +264,34 @@ def get_pnl_for_month(month):
         cat = CATEGORY_MAP.get(row["type_id"], "Без категории")
         cats[cat] = cats.get(cat, 0) + f(row["total"])
 
-    # Себестоимость = продажи × cost.
-    # Источник: monthly_realization_rows (то, что Ozon кладёт в Отчёт по экономике).
-    # Возвраты (is_return=1) не учитываем.
+    # ═══ СЕБЕСТОИМОСТЬ ═══
+    # COGS = продажи (is_return=0) − возвраты (is_return=1), по себестоимости
+    # на конец месяца. Возврат месяца M может относиться к продаже месяца M-1 —
+    # это корректная обратная проводка: вычитаем cost в месяц возврата.
     cogs = 0.0
     for r in con.execute("""
-        SELECT sku, SUM(quantity) AS q
+        SELECT sku,
+               SUM(CASE WHEN is_return = 0 THEN quantity ELSE 0 END) AS q_buy,
+               SUM(CASE WHEN is_return = 1 THEN quantity ELSE 0 END) AS q_ret
         FROM monthly_realization_rows
-        WHERE month = ? AND is_return = 0 AND quantity > 0
+        WHERE month = ? AND quantity > 0
         GROUP BY sku
     """, (month,)):
         sku = r["sku"]
-        qty = f(r["q"])
-        if qty <= 0:
+        qty_net = f(r["q_buy"]) - f(r["q_ret"])
+        if qty_net == 0:
             continue
 
         r2 = con.execute("""
             SELECT cost_price FROM product_cost_history
             WHERE sku = ? AND date_from < ?
-            ORDER BY date_from DESC LIMIT 1
+            ORDER BY date_from DESC, id DESC LIMIT 1
         """, (sku, d2)).fetchone()
         cost = f(r2[0]) if r2 and r2[0] else 0
         if cost == 0:
             continue
 
-        cogs += cost * qty
+        cogs += cost * qty_net
 
     con.close()
 
@@ -195,7 +302,7 @@ def get_pnl_for_month(month):
     expenses_no_ads = commission + services_no_ads - abs(cats.get("ItemCompensation", 0))
     margin = revenue - expenses_no_ads - ads - cogs
     tax_base = revenue - bonus
-    tax = tax_base * TAX_RATE
+    tax = tax_base * tax_rate
     net = margin - tax
     roi = (net / cogs * 100) if cogs else 0
 
@@ -227,14 +334,17 @@ def get_pnl_for_month(month):
     }
 
 
-
 def get_all_months():
     con = sqlite3.connect(DB)
-    months = [r[0] for r in con.execute(
-        "SELECT DISTINCT month FROM monthly_realization_rows ORDER BY month"
-    )]
+    months = set()
+    # 1. Берем месяцы, за которые есть закрытые отчеты
+    for r in con.execute("SELECT DISTINCT month FROM monthly_realization_rows"):
+        if r[0]: months.add(r[0])
+    # 2. Берем месяцы из ежедневных начислений (чтобы видеть текущий месяц)
+    for r in con.execute("SELECT DISTINCT substr(date, 1, 7) FROM accruals WHERE date IS NOT NULL"):
+        if r[0]: months.add(r[0])
     con.close()
-    return months
+    return sorted(list(months))
 
 
 def col_letter(n):
@@ -245,15 +355,7 @@ def col_letter(n):
     return s
 
 
-
 def add_calc_formulas(rows):
-    """Строки:
-       36 = SUM(37:40)  Операционные всего
-       37-40           Операционные подстроки (ручной ввод C:N)
-       42 = 34 - 36    EBITDA
-       46 = 42 + 44    Чистая (44 — налог, уже со знаком минус)
-       47 = -46/32*100 ROI
-    """
     COL_YEAR = 2
     COL_PCT = 3
     COL_MONTH_1 = 4
@@ -295,9 +397,9 @@ def add_calc_formulas(rows):
         rows[46][idx] = f"=IF({col}32=0;0;-{col}46/{col}32*100)"
 
 
-def build_table(year=2026):
+def build_table(year, tax_rate):
     all_months = [m for m in get_all_months() if m.startswith(str(year))]
-    by_month = {m: get_pnl_for_month(m) for m in all_months}
+    by_month = {m: get_pnl_for_month(m, tax_rate) for m in all_months}
 
     COL_YEAR = 2
     COL_PCT = 3
@@ -366,7 +468,7 @@ def build_table(year=2026):
         ("", None),
         ("ОПЕРАЦИОННАЯ ПРИБЫЛЬ (EBITDA)", "margin"),
         ("", None),
-        ("Налоги (УСН 15%)", "tax"),
+        (f"Налоги (УСН {tax_rate*100:.0f}%)", "tax"),
         ("", None),
         ("ЧИСТАЯ ПРИБЫЛЬ", "net"),
         ("Рентабельность (ROI)", "roi"),
@@ -374,7 +476,6 @@ def build_table(year=2026):
         ("Нераспределённая прибыль", "net"),
         ("Накопленная прибыль", "net"),
     ]
-
 
     NEGATIVE = {"expenses_total", "expenses_no_ads", "cogs", "commission",
                 "fulfil_total", "fulfil_logistics", "fulfil_reverse",
@@ -426,261 +527,16 @@ def build_table(year=2026):
 
 
 def apply_format(ws, n_rows):
-    """Форматирование листа P&L: заголовок, блоки, итоги, числа, границы."""
-    sid = ws.id
-    reqs = []
-
-    def grid(rng):
-        m = re.match(r"([A-Z]+)(\d+):([A-Z]+)(\d+)", rng)
-        if not m:
-            m2 = re.match(r"([A-Z]+)(\d+)", rng)
-            c1, r1 = m2.group(1), m2.group(2)
-            c2, r2 = c1, r1
-        else:
-            c1, r1, c2, r2 = m.groups()
-
-        def col(c):
-            n = 0
-            for ch in c:
-                n = n * 26 + (ord(ch) - ord("A") + 1)
-            return n - 1
-
-        return {"sheetId": sid,
-                "startRowIndex": int(r1) - 1, "endRowIndex": int(r2),
-                "startColumnIndex": col(c1), "endColumnIndex": col(c2) + 1}
-
-    def fmt(rng, bg=None, fg=None, bold=False, italic=False,
-            size=10, align=None):
-        cf = {}
-        if bg:
-            cf["backgroundColor"] = bg
-        tf = {}
-        if fg:
-            tf["foregroundColor"] = fg
-        if bold:
-            tf["bold"] = True
-        if italic:
-            tf["italic"] = True
-        if size:
-            tf["fontSize"] = size
-        if tf:
-            cf["textFormat"] = tf
-        if align:
-            cf["horizontalAlignment"] = align
-        reqs.append({"repeatCell": {
-            "range": grid(rng),
-            "cell": {"userEnteredFormat": cf},
-            "fields": "userEnteredFormat"}})
-
-    # ─── Цвета ─────────────────────────────────────────────
-    NAVY   = {"red": 0.10, "green": 0.18, "blue": 0.35}
-    WHITE  = {"red": 1,    "green": 1,    "blue": 1}
-    BLUE   = {"red": 0.10, "green": 0.45, "blue": 0.91}   # 1A73E8
-    GREY_H = {"red": 0.93, "green": 0.93, "blue": 0.93}
-    GREY_T = {"red": 0.50, "green": 0.50, "blue": 0.50}
-    GREEN_BG = {"red": 0.90, "green": 0.96, "blue": 0.92} # E6F4EA
-    GREEN_FG = {"red": 0.07, "green": 0.45, "blue": 0.20} # 137333
-    RED_BG   = {"red": 0.99, "green": 0.91, "blue": 0.90} # FCE8E6
-    RED_FG   = {"red": 0.77, "green": 0.13, "blue": 0.12} # C5221F
-    YEL_BG   = {"red": 1.00, "green": 0.95, "blue": 0.80} # FFF2CC
-    YEL_FG   = {"red": 0.50, "green": 0.38, "blue": 0.00} # 7F6000
-    NET_POS_BG = {"red": 0.85, "green": 0.92, "blue": 0.83}
-    NET_NEG_BG = {"red": 0.96, "green": 0.80, "blue": 0.80}
-    NET_POS_FG = {"red": 0.15, "green": 0.31, "blue": 0.07}
-    NET_NEG_FG = {"red": 0.60, "green": 0.00, "blue": 0.00}
-    BORDER_MED = {"red": 0.75, "green": 0.75, "blue": 0.75}
-
-    # ─── 1. Заголовок A1:S1 ────────────────────────────────
-    reqs.append({"unmergeCells": {"range": grid("A1:T1")}})
-    reqs.append({"mergeCells": {"range": grid("A1:T1"),
-                                "mergeType": "MERGE_ALL"}})
-    fmt("A1:T1", bg=BLUE, fg=WHITE, bold=True, size=16, align="CENTER")
-    reqs.append({"updateDimensionProperties": {
-        "range": {"sheetId": sid, "dimension": "ROWS",
-                  "startIndex": 0, "endIndex": 1},
-        "properties": {"pixelSize": 45}, "fields": "pixelSize"}})
-
-    # ─── 2. Шапка колонок (строка 2) ───────────────────────
-    fmt("A2:T2", bg=GREY_H, fg=NAVY, bold=True, size=11, align="CENTER")
-    reqs.append({"updateDimensionProperties": {
-        "range": {"sheetId": sid, "dimension": "ROWS",
-                  "startIndex": 1, "endIndex": 2},
-        "properties": {"pixelSize": 32}, "fields": "pixelSize"}})
-
-    # ─── 3. Справочные строки (3-6) ────────────────────────
-    for r in (3, 4, 5, 6):
-        fmt(f"A{r}:T{r}", fg=GREY_T, italic=True, size=10)
-
-    # ─── 4. ДОХОДЫ (8) + подстроки (9-12) ──────────────────
-    fmt("A8:S8",  bg=GREEN_BG, fg=GREEN_FG, bold=True, size=11)
-    for r in (9, 10, 11, 12):
-        fmt(f"A{r}:T{r}", size=10)
-
-    # ─── 5. ПРЯМЫЕ РАСХОДЫ (14) + подстроки (15-27) ────────
-    fmt("A14:S14", bg=RED_BG, fg=RED_FG, bold=True, size=11)
-    SUB_SUB = {17, 18, 19, 20, 22, 23}          # логистика, отзывы и пр.
-    for r in range(15, 28):
-        if r in SUB_SUB:
-            fmt(f"A{r}:T{r}", fg=GREY_T, italic=True, size=9)
-        else:
-            fmt(f"A{r}:T{r}", size=10)
-
-    # ─── 6. Себестоимость (29) ─────────────────────────────
-    fmt("A29:S29", fg=RED_FG, bold=True, size=10)
-
-    # ─── 7. ВАЛОВАЯ ПРИБЫЛЬ (31) ───────────────────────────
-    fmt("A31:S31", bg=YEL_BG, fg=YEL_FG, bold=True, size=11)
-
-    # ─── 8. ОПЕРАЦИОННЫЕ (33-37) ───────────────────────────
-    fmt("A33:S33", bg=GREY_H, fg=NAVY, bold=True, size=11)
-    for r in range(34, 38):
-        fmt(f"A{r}:T{r}", fg=GREY_T, italic=True, size=9)
-
-    # ─── 9. EBITDA (39) ────────────────────────────────────
-    fmt("A39:S39", bg=YEL_BG, fg=YEL_FG, bold=True, size=11)
-
-    # ─── 10. Налоги (41) ───────────────────────────────────
-    fmt("A41:S41", fg=RED_FG, bold=True, size=10)
-
-    # ─── 11. ЧИСТАЯ ПРИБЫЛЬ (43) — по знаку B43 ────────────
-    net_val = 0.0
-    try:
-        cell = ws.acell("B43").value
-        if cell:
-            net_val = float(str(cell).replace(" ", "").replace(",", "."))
-    except Exception:
-        pass
-    if net_val >= 0:
-        fmt("A43:S43", bg=NET_POS_BG, fg=NET_POS_FG, bold=True, size=13)
-    else:
-        fmt("A43:S43", bg=NET_NEG_BG, fg=NET_NEG_FG, bold=True, size=13)
-
-    # ─── 12. ROI и хвост (44-47) ───────────────────────────
-    for r in range(44, 48):
-        fmt(f"A{r}:T{r}", fg=GREY_T, italic=True, size=10)
-
-    # ─── 13. Выравнивание ──────────────────────────────────
-    for r in range(3, n_rows + 1):
-        fmt(f"A{r}", align="LEFT")
-        fmt(f"B{r}:S{r}", align="RIGHT")
-
-    # ─── 14. Number format ─────────────────────────────────
-    RUB = '#,##0.00" ₽";[Red]-#,##0.00" ₽"'
-    PCT = '0.00" %"'
-    reqs.append({"repeatCell": {
-        "range": grid(f"B3:T{n_rows}"),
-        "cell": {"userEnteredFormat": {"numberFormat": {
-            "type": "NUMBER", "pattern": RUB}}},
-        "fields": "userEnteredFormat.numberFormat"}})
-    # ROI — проценты
-    reqs.append({"repeatCell": {
-        "range": grid("B44:T44"),
-        "cell": {"userEnteredFormat": {"numberFormat": {
-            "type": "NUMBER", "pattern": PCT}}},
-        "fields": "userEnteredFormat.numberFormat"}})
-
-    # ─── 15. Ширины ────────────────────────────────────────
-    reqs.append({"updateDimensionProperties": {
-        "range": {"sheetId": sid, "dimension": "COLUMNS",
-                  "startIndex": 0, "endIndex": 1},
-        "properties": {"pixelSize": 340}, "fields": "pixelSize"}})
-    reqs.append({"updateDimensionProperties": {
-        "range": {"sheetId": sid, "dimension": "COLUMNS",
-                  "startIndex": 1, "endIndex": 2},
-        "properties": {"pixelSize": 130}, "fields": "pixelSize"}})
-    for i in range(2, 19):
-        reqs.append({"updateDimensionProperties": {
-            "range": {"sheetId": sid, "dimension": "COLUMNS",
-                      "startIndex": i, "endIndex": i + 1},
-            "properties": {"pixelSize": 95}, "fields": "pixelSize"}})
-
-    # ─── 16. Заморозка — ТОЛЬКО строки (без колонок) ───────
-    reqs.append({"updateSheetProperties": {
-        "properties": {"sheetId": sid,
-                       "gridProperties": {"frozenRowCount": 2}},
-        "fields": "gridProperties.frozenRowCount"}})
-
-    # ─── 17. Границы ───────────────────────────────────────
-    reqs.append({"updateBorders": {
-        "range": grid("A1:T1"),
-        "bottom": {"style": "SOLID_THICK", "color": BLUE}}})
-    for rng in ("A8:S8", "A14:S14", "A33:S33"):
-        reqs.append({"updateBorders": {
-            "range": grid(rng),
-            "top":    {"style": "SOLID", "color": BORDER_MED},
-            "bottom": {"style": "SOLID", "color": BORDER_MED}}})
-    for rng in ("A31:S31", "A39:S39", "A43:S43"):
-        reqs.append({"updateBorders": {
-            "range": grid(rng),
-            "top":    {"style": "SOLID_THICK", "color": NAVY},
-            "bottom": {"style": "SOLID",       "color": BORDER_MED}}})
-
-    ws.spreadsheet.batch_update({"requests": reqs})
-
-
-def apply_notes(ws):
-    """Примечания (tooltips) к строкам P&L."""
-    NOTES = {
-        3:  "Количество заказов за период. Справочно, не входит в расчёт P&L.",
-        4:  "Баллы за скидки, начисленные Ozon. Справочно.",
-        5:  "Сумма соответствует «Всего к начислению» из Отчёта о реализации. В P&L = Продажи − Комиссия Ozon.",
-        6:  "Сумма из Акта сверки Ozon. Используется для сверки с банком.",
-        8:  "База 100% для расчёта процентов. Остальные строки — в % от этой суммы.",
-        9:  "Продажи минус возвраты. Основной доход.",
-        10: "Компенсация от Ozon за скидки продавца.",
-        11: "Соинвестиции Ozon в продвижение товара.",
-        12: "Прочие компенсации от Ozon.",
-        14: "Сумма всех переменных расходов: комиссия, фулфилмент, маркетинг, услуги агентов, FBO.",
-        15: "Комиссия Ozon за вычетом возвратов. Основная статья расходов.",
-        16: "Сумма строк 17–20.",
-        17: "Логистика прямых отправлений (FBO/FBS).",
-        18: "Возвраты покупателей.",
-        19: "Доставка до пункта выдачи.",
-        20: "Обработка и сборка заказов на складе Ozon.",
-        21: "Сумма строк 22–23.",
-        22: "Реклама в Ozon.",
-        23: "Услуги по работе с отзывами.",
-        24: "Эквайринг и прочие агентские услуги.",
-        25: "Хранение и обработка на складе Ozon.",
-        26: "Прочие услуги Ozon.",
-        27: "Начисления, не попавшие в другие категории.",
-        29: "cost_price × количество. Обновляется через файл себестоимости.",
-        31: "= Доходы − Прямые расходы − Себестоимость.",
-        33: "Постоянные расходы: персонал, админ, коммерческие.",
-        34: "Зарплата, налоги с ФОТ.",
-        35: "Аренда, связь, канцелярия.",
-        36: "Реклама вне Ozon, упаковка.",
-        37: "Прочие операционные расходы.",
-        39: "= Валовая прибыль − Операционные расходы.",
-        41: "База расчёта: уточнить у бухгалтера (от валовой или от выручки).",
-        43: "= EBITDA − Налоги. Зелёный фон — плюс, красный — минус.",
-        44: "= Чистая прибыль / Себестоимость × 100%.",
-        45: "Выплачено за период.",
-        46: "= Чистая прибыль − Дивиденды.",
-        47: "Сумма по всем месяцам на текущий момент.",
-    }
-    sid = ws.id
-    reqs = []
-    for r, text in NOTES.items():
-        reqs.append({"updateCells": {
-            "range": {"sheetId": sid,
-                      "startRowIndex": r-1, "endRowIndex": r,
-                      "startColumnIndex": 0, "endColumnIndex": 1},
-            "rows": [{"values": [{"note": text}]}],
-            "fields": "note"}})
-    for i in range(0, len(reqs), 50):
-        ws.spreadsheet.batch_update({"requests": reqs[i:i+50]})
-    print(f"[OK] Примечаний: {len(reqs)}")
+    """Оставлено для совместимости. Не вызывается — стиль в pnl_format.py."""
+    pass
 
 
 def read_operational(ws):
-    """Читает ручной ввод ТОЛЬКО из колонок C:N (месяцы) строк 37-40.
-    Колонки A (заголовки), B (формула года), O:R (кварталы) НЕ трогает."""
+    """Читает ручной ввод из колонок C:N (месяцы) строк 37-40."""
     saved = {}
     for r in (37, 38, 39, 40):
         try:
             row = ws.row_values(r, value_render_option="UNFORMATTED_VALUE")
-            # D..O = 1-based колонки 4..15 = 0-based индексы 3..14
             for idx in range(3, 15):
                 if idx < len(row):
                     v = row[idx]
@@ -692,13 +548,11 @@ def read_operational(ws):
 
 
 def restore_operational(ws, saved):
-    """Возвращает ручные значения обратно в 34-37 после sync."""
     if not saved:
         print("[i] Ручных значений не найдено")
         return
     updates = []
     for addr, val in saved.items():
-        # Пытаемся преобразовать в число
         try:
             num = float(str(val).replace(" ", "").replace("\xa0", "").replace(",", "."))
             updates.append({"range": addr, "values": [[num]]})
@@ -717,30 +571,25 @@ def main():
     print(f"ВЫГРУЗКА P&L ЗА {year}  {'(локально)' if local else ''}")
     print("=" * 80)
 
-    rows = build_table(year)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets",
+              "https://www.googleapis.com/auth/drive"]
+    creds = Credentials.from_service_account_file(CREDENTIALS, scopes=scopes)
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SHEET_ID)
+
+    tax_rate = get_tax_rate(sh)
+
+    rows = build_table(year, tax_rate)
     print(f"\nСтрок: {len(rows)}")
 
     if local:
-        # Сохраняем локально в CSV
         import csv
         out = os.path.join(APP_DIR, f"pnl_{year}.csv")
         with open(out, "w", encoding="utf-8-sig", newline="") as f:
             w = csv.writer(f, delimiter=";")
             w.writerows(rows)
         print(f"\n[OK] Сохранено: {out}")
-        # Печатаем ключевые строки
-        print()
-        for row in rows:
-            a = row[0] if row else ""
-            b = row[1] if len(row) > 1 else ""
-            print(f"  {a:<50} {b}")
         return
-
-    scopes = ["https://www.googleapis.com/auth/spreadsheets",
-              "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_file(CREDENTIALS, scopes=scopes)
-    client = gspread.authorize(creds)
-    sh = client.open_by_key(SHEET_ID)
 
     try:
         ws = sh.worksheet("P&L")
@@ -753,8 +602,8 @@ def main():
     restore_operational(ws, saved_op)
     print(f"Записано строк: {len(rows)}")
 
-    apply_format(ws, len(rows))
-
+    # Стилизация — в PNL/pnl_format.py
+    print("[i] Стилизация — в PNL/pnl_format.py")
 
     print(f"\nГОТОВО. https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit")
     print("=" * 80)
@@ -762,3 +611,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

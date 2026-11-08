@@ -1,7 +1,13 @@
 ﻿"""
 sync_finance.py — синхронизация финансовых начислений из Ozon API.
+
 Тянет /v1/finance/accrual/by-day с последней даты в БД (или с 2026-09-01).
 Идемпотентно: повторный запуск не создаёт дублей.
+
+Фикс от 2026-10-09: добавлен блок 5 — сиротские записи
+(нет posting, нет item_fees/non_item_fee/container_fees),
+которые раньше терялись. Это штрафы, страхование, компенсации —
+пишутся с type_id=0 и именем из accrued_category.
 """
 import os
 import json
@@ -23,6 +29,7 @@ DB = "ozon.db"
 
 START_DEFAULT = "2026-09-01"
 END = datetime.now().strftime("%Y-%m-%d")
+
 
 # Переопределяется через --from и --to
 def parse_args():
@@ -90,7 +97,7 @@ def get_start_date(cur):
     max_date = row[0] if row else None
     if not max_date:
         return START_DEFAULT
-    return (datetime.strptime(max_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+    return (datetime.strptime(max_date, "%Y-%m-%d") - timedelta(days=2)).strftime("%Y-%m-%d")
 
 
 def save_accrual(cur, acc, types):
@@ -208,6 +215,21 @@ def save_accrual(cur, acc, types):
                 """, (accrual_id, date_str, None, tid,
                       types.get(tid, f"type_{tid}"), amt))
                 n_svc += 1
+
+    # === 5. Сиротские записи ===
+    # Нет posting, нет item_fees/non_item_fee/container_fees.
+    # По схеме Ozon — это штрафы, страхование, компенсации.
+    # Пишем total_amount как услугу с type_id=0 и именем accrued_category.
+    if n_svc == 0 and not products:
+        total_amt = to_float(acc.get("total_amount"))
+        if total_amt is not None and total_amt != 0:
+            cat_name = acc.get("accrued_category") or "UNKNOWN"
+            cur.execute("""
+                INSERT OR IGNORE INTO accruals_services
+                (accrual_id, date, sku, type_id, type_name, amount)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (accrual_id, date_str, None, 0, cat_name, total_amt))
+            n_svc += 1
 
     return n_acc, n_svc
 

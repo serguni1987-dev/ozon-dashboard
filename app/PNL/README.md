@@ -198,3 +198,4 @@ P&L берёт цену на конец месяца через `date_from < к�
 - `create_cost_history.py` — однократно создал таблицу
 - `migrate_costs_csv.py` — однократно перенёс старый CSV
 
+

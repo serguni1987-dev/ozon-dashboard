@@ -132,7 +132,8 @@ sku | date\_from | cost\_price | source | created\_at
 
 
 
-\- `check\_costs\_alert.py` — вызывается из `run.py` (корень `app/`)
+\- `check\_cost
+s\_alert.py` — вызывается из `run.py` (корень `app/`)
 
 \- `mark\_brands.py` — влияет на ЦЕНЫ/ОСТАТКИ, не только на себестоимость
 

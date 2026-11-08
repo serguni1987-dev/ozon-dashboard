@@ -1,35 +1,83 @@
-# === СЕКРЕТЫ ===
+# ─── СЕКРЕТЫ ───
 .env
 .env.*
-!.env.example
 credentials.json
-credentials*.json
+*.pem
+*.key
+*.json
+!requirements.json
+!app/_accrual_types.json
 
-# === БАЗА ДАННЫХ ===
-ozon.db
-app/ozon.db
-
-# === ВЫГРУЗКИ / БЭКАПЫ ===
-downloads/
-app/downloads/*.xlsx
-backups/*.db
+# ─── БАЗА ДАННЫХ ───
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+_backups/
 app/backups/
 
-# === PYTHON ===
+# ─── ВЫГРУЗКИ И ДАННЫЕ ───
+app/downloads/
+*.xlsx
+*.xls
+out/
+_archive/old_csv/
+_archive/old_reports/
+_archive/logs/
+*.csv
+!costs_all.csv
+!Себестоимость/costs_all.csv
+!requirements.csv
+
+# ─── ЛОГИ ───
+*.log
+_logs/
+*.lock
+
+# ─── ДАМПЫ API ───
+unitka/_dumps/
+app/_*_raw.json
+app/_*_sep*.json
+app/_*_oct*.json
+app/_*_tx*.json
+
+# ─── БЭКАПЫ КОДА ───
+*.bak
+*.bak_*
+*.bak-*
+*.bak.*
+*.bak[0-9]*
+app/PNL/*.bak*
+
+# ─── PYTHON ───
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-*.pyd
+.pytest_cache/
 .venv/
 venv/
 env/
+.eggs/
+*.egg-info/
 
-# === IDE / OS ===
+# ─── IDE ───
 .vscode/
 .idea/
+*.swp
+*.swo
+
+# ─── OS ───
 .DS_Store
 Thumbs.db
-app_backup_*/
+desktop.ini
 
-costs_all.csv
-costs_all_info.csv
+# ─── АРХИВ И ПАТЧИ (опционально — см. ниже) ───
+# _archive/
+# _patches/
+# unitka/_patches/_archive/
+/_diag/
+_patches/
+unitka/_patches/
+app/_accrual_types.json
+app/_*.py
+_archive/
