@@ -43,9 +43,17 @@ def main():
 
     logger.info(f"АНАЛИТИЧЕСКИЙ ПАЙПЛАЙН: {args.date_from} — {args.date_to}")
 
-    from . import build_sku_map, calc_abc_xyz, calc_pulse, calc_unit_summary
+    from . import build_sku_map, calc_abc_xyz, calc_pulse, calc_unit_summary, load_sales_xlsx, calc_funnel
 
     results = []
+
+    # 0. Воронка: загрузка свежего .xlsx из app/downloads (не падает, если папка пустая)
+    try:
+        load_sales_xlsx.main()
+    except SystemExit:
+        pass
+    except Exception as e:
+        logger.warning(f"[WARN] Загрузка xlsx: {type(e).__name__}: {e}")
 
     if not args.skip_sku_map:
         results.append(('1. Сборка карты SKU', step_with_retry('build_sku_map', build_sku_map.main)))
@@ -54,12 +62,15 @@ def main():
         logger.info("[SKIP] Сборка карты SKU пропущена")
 
     results.append(('2. ABC/XYZ-анализ', step_with_retry('calc_abc_xyz', calc_abc_xyz.main, ['--from', args.date_from, '--to', args.date_to])))
-    
+
     time.sleep(10)
     results.append(('3. Юнит-сводка', step_with_retry('calc_unit_summary', calc_unit_summary.main)))
-    
+
     time.sleep(10)
-    results.append(('4. Лист ПУЛЬТ', step_with_retry('calc_pulse', calc_pulse.main)))
+    results.append(('4. Лист Воронка', step_with_retry('calc_funnel', calc_funnel.main)))
+
+    time.sleep(10)
+    results.append(('5. Лист ПУЛЬТ', step_with_retry('calc_pulse', calc_pulse.main)))
 
     logger.info("")
     logger.info("=" * 60)

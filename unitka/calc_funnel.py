@@ -47,7 +47,7 @@ def _load_period(dfrom: str, dto: str, only_in_stock: bool = False):
 
     cur.execute("""
         SELECT am.sku, am.offer_id, am.impressions, am.views, am.cart,
-               am.orders, am.buyouts, am.position, am.drr
+               am.orders, am.buyouts, am.position, am.drr, am.avg_price
         FROM analytics_manual am
         WHERE am.date BETWEEN ? AND ?
     """, (dfrom, dto))
@@ -62,7 +62,7 @@ def _load_period(dfrom: str, dto: str, only_in_stock: bool = False):
         if sku not in agg:
             agg[sku] = {"offer_id": r[1], "impressions": 0, "views": 0, "cart": 0,
                         "orders": 0, "buyouts": 0, "position_sum": 0, "position_n": 0,
-                        "drr_sum": 0, "drr_n": 0}
+                        "drr_sum": 0, "drr_n": 0, "price_sum": 0.0, "price_n": 0}
         a = agg[sku]
         a["impressions"] += r[2] or 0
         a["views"] += r[3] or 0
@@ -71,6 +71,7 @@ def _load_period(dfrom: str, dto: str, only_in_stock: bool = False):
         a["buyouts"] += r[6] or 0
         if r[7]: a["position_sum"] += r[7]; a["position_n"] += 1
         if r[8]: a["drr_sum"] += r[8]; a["drr_n"] += 1
+        if r[9]: a["price_sum"] += r[9]; a["price_n"] += 1
 
     # Фильтры
     result = []
@@ -83,6 +84,7 @@ def _load_period(dfrom: str, dto: str, only_in_stock: bool = False):
 
         pos = round(a["position_sum"] / a["position_n"], 1) if a["position_n"] else None
         drr = round(a["drr_sum"] / a["drr_n"], 1) if a["drr_n"] else None
+        avg_price = round(a["price_sum"] / a["price_n"], 1) if a["price_n"] else None
 
         # Статус
         if a["orders"] == 0 and a["impressions"] >= 100:
@@ -105,7 +107,7 @@ def _load_period(dfrom: str, dto: str, only_in_stock: bool = False):
             "c3": _pct(a["orders"], a["cart"]),
             "c4": _pct(a["buyouts"], a["orders"]),
             "c_total": _pct(a["orders"], a["impressions"]),
-            "position": pos, "drr": drr, "qty": qty, "status": status,
+            "position": pos, "drr": drr, "avg_price": avg_price, "qty": qty, "status": status,
         })
     return result
 
@@ -131,7 +133,7 @@ def _build_report(items):
         key=lambda x: x[1]
     )
     main.append(f"🟡 Узкое горлышко: {narrow_name} ({narrow_val}%)")
-    top = sorted(meaningful, key=lambda x: x["c_total"], reverse=True)[:3]
+    top = sorted([i for i in meaningful if i["orders"] > 0], key=lambda x: x["c_total"], reverse=True)[:3]
     for t in top:
         main.append(f"🟢 Топ: SKU {t['sku']} — конв. {t['c_total']}%")
 

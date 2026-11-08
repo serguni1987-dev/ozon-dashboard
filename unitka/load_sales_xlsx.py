@@ -15,7 +15,7 @@ DOWNLOADS = APP_DIR / "downloads"
 
 COLUMN_KEYS = {
     "sku": ["sku"],
-    "offer_id": ["артикул продавца"],
+    "offer_id": ["артикул продавца", "артикул"],
     "name": ["товары"],
     "date": ["день"],
     "impressions": ["показы всего"],
@@ -107,11 +107,15 @@ def _build_headers(df, max_header_rows=20):
     if data_start is None:
         data_start = sku_row + 2
 
-    # Собираем ВСЕ заголовки каждой колонки через пробел
+    # Собираем заголовки каждой колонки через пробел.
+    # Берём ТОЛЬКО строки с названиями (группа + название колонки), без строки-описания:
+    # описание «Показы всего» содержит слова «посещения карточки», из-за чего
+    # views раньше находились в колонке показов (impressions == views во всех строках).
+    header_rows_end = min(sku_row + 2, data_start)
     headers = []
     for j in range(df.shape[1]):
         parts = []
-        for i in range(data_start):
+        for i in range(header_rows_end):
             v = df.iloc[i, j]
             if v is not None and not (isinstance(v, float) and pd.isna(v)):
                 s = str(v).strip()
@@ -121,6 +125,37 @@ def _build_headers(df, max_header_rows=20):
         headers.append(header)
 
     return headers, data_start, sku_col
+
+def ensure_table(conn):
+    """Создаёт analytics_manual, если её ещё нет, и уникальный индекс для идемпотентности."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS analytics_manual (
+            date TEXT NOT NULL,
+            sku TEXT NOT NULL,
+            offer_id TEXT, name TEXT,
+            impressions INTEGER DEFAULT 0, views INTEGER DEFAULT 0,
+            cart INTEGER DEFAULT 0, orders INTEGER DEFAULT 0,
+            buyouts INTEGER DEFAULT 0,
+            position REAL, drr REAL, avg_price REAL, price_index REAL,
+            discount_pct REAL, reviews_count INTEGER, rating REAL,
+            source_file TEXT, loaded_at TEXT
+        )
+    """)
+    # Уникальность (date, sku): повторная загрузка того же отчёта не создаёт дублей.
+    # Сначала убираем возможные дубли от прошлых загрузок без индекса.
+    conn.execute("""
+        DELETE FROM analytics_manual WHERE rowid NOT IN (
+            SELECT rowid FROM analytics_manual am2
+            WHERE am2.rowid = (
+                SELECT rowid FROM analytics_manual a
+                WHERE a.date = analytics_manual.date AND a.sku = analytics_manual.sku
+                ORDER BY a.loaded_at DESC, a.rowid DESC LIMIT 1))
+    """)
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_am_date_sku ON analytics_manual(date, sku)")
+    except Exception as e:
+        logger.warning("Уникальный индекс не создан (останутся дубли): %s", e)
+    conn.commit()
 
 def load_file(path, date_str=None):
     if date_str is None:
@@ -148,6 +183,7 @@ def load_file(path, date_str=None):
         return 0
 
     conn = connect()
+    ensure_table(conn)
     cur = conn.cursor()
     saved = 0
     skipped = 0
