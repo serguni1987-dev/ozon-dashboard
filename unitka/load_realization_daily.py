@@ -1,4 +1,4 @@
-"""Загрузка дневной реализации из /v1/finance/accrual/by-day."""
+﻿"""Загрузка дневной реализации из /v1/finance/accrual/by-day."""
 import argparse
 import json
 import re
@@ -203,8 +203,7 @@ def load_day(client, con, day, force=False):
 def main():
     args = parse_args()
     config.check_credentials()
-    client = OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY,
-                        base=config.OZON_BASE_URL)
+    client = OzonClient()
     con = db.connect()
     db.init_schema(con)
 
