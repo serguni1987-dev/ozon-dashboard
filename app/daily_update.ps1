@@ -115,6 +115,14 @@ if (-not (Invoke-PyRetry "unitka.run_finance" @("--days","7"))) {
     Write-Host "  run_finance пропущен после повторов." -ForegroundColor Red
 }
 
+
+# === ЗАГРУЗКА ДАННЫХ ИЗ OZON API ===
+Write-Host "[New] Загрузка начислений и отправлений из Ozon..." -ForegroundColor Yellow
+$FromDate = (Get-Date).AddDays(-7).ToString("yyyy-MM-dd")
+$ToDate = Get-Date -Format "yyyy-MM-dd"
+python -m unitka.load_realization_daily --from $FromDate --to $ToDate --force
+python -m unitka.load_postings --from $FromDate --to $ToDate
+
 # === 3. КОНТЕНТ-РЕЙТИНГИ ===
 Write-Host "[3/14] Загрузка контент-рейтингов..." -ForegroundColor Yellow
 python -m unitka.load_ratings
