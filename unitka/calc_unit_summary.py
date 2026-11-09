@@ -46,13 +46,13 @@ def build():
             r.sku,
             COALESCE(SUM(r.sale_price + r.bonus + r.coinvestment), 0) AS revenue,
             COALESCE(SUM(CASE WHEN r.is_return = 0 THEN r.quantity * c.cost_price ELSE 0 END), 0) AS cogs,
-            COALESCE(SUM(ABS(s.amount)), 0) AS ozon_exp
+            COALESCE(SUM(s.total_exp), 0) AS ozon_exp
         FROM realization_daily r
         LEFT JOIN (
             SELECT sku, cost_price FROM product_cost_history 
             WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)
         ) c ON r.sku = c.sku
-        LEFT JOIN accrual_sku_daily s ON r.sku = s.sku AND r.date = s.date
+        LEFT JOIN (SELECT sku, date, SUM(ABS(amount)) as total_exp FROM accrual_sku_daily GROUP BY sku, date) s ON r.sku = s.sku AND r.date = s.date
         WHERE r.date LIKE '2026-%'
         GROUP BY r.sku
     """)
