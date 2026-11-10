@@ -8,6 +8,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from .db import connect
+from . import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -40,18 +41,22 @@ KPI_LIST = [
     ("liq_share_stock", "Доля неликвида в товаре", "%", "down"),
     ("active_share_revenue", "Доля активных в выручке", "%", "up"),
     ("liq_sold_skus", "Распродано SKU за месяц", "шт", "up"),
+    ("roi", "ROI", "%", "up"),   # прибыль / себестоимость проданного; нужен листу «Стратегии»
 ]
 
 
 def read_plan(sh):
     """Читает лист «План». Возвращает {month: {type: {kpi_key: value}}}."""
-    try:
-        ws = sh.worksheet(PLAN_SHEET)
-    except gspread.WorksheetNotFound:
-        logger.warning("Лист «План» не найден. Создайте его.")
-        return {}
-
-    rows = ws.get_all_values()
+    # Сначала блок «ПЛАН ПО МЕСЯЦАМ» листа НАСТРОЙКИ (единый лист ручного ввода),
+    # если его нет — старый лист «План».
+    rows = settings.plan_rows(sh)
+    if rows is None:
+        try:
+            ws = sh.worksheet(PLAN_SHEET)
+        except gspread.WorksheetNotFound:
+            logger.warning("План не найден: нет блока «ПЛАН ПО МЕСЯЦАМ» на листе НАСТРОЙКИ и нет листа «План».")
+            return {}
+        rows = ws.get_all_values()
     if len(rows) < 2:
         return {}
 
@@ -139,6 +144,13 @@ def calc_fact(month_str):
         WHERE date >= ? AND date < ? AND COALESCE(is_cancelled, 0) = 0
     """, (d_from, d_to))
     orders = cur.fetchone()[0] or 0
+    # Проданные единицы и их выручка из начислений — та же база, что у выручки P&L.
+    cur.execute("""
+        SELECT COUNT(*), COALESCE(SUM(sale_price + bonus + coinvestment), 0)
+        FROM accruals WHERE date >= ? AND date < ? AND sale_price > 0
+    """, (d_from, d_to))
+    sold_units, sold_revenue = cur.fetchone()
+    sold_units = sold_units or 0
 
     # === Разделение на активные / распродажу ===
     cur.execute("""
@@ -167,7 +179,19 @@ def calc_fact(month_str):
             WHERE date >= ? AND date < ? AND sku IN ({placeholders})
         """, (d_from, d_to, *skus_list))
         rev = cur.fetchone()[0] or 0
-        return {"rev": rev, "cogs": 0}
+        # Себестоимость группы: продажа +себестоимость, возврат −себестоимость (как в finance_core).
+        # Раньше здесь стоял 0, и «Прибыль (активные)» считалась без себестоимости.
+        cur.execute(f"""
+            SELECT COALESCE(SUM(
+                CASE WHEN a.sale_price > 0 THEN 1 WHEN a.sale_price < 0 THEN -1 ELSE 0 END
+                * COALESCE((SELECT h.cost_price FROM product_cost_history h
+                            WHERE h.sku = a.sku
+                            ORDER BY h.date_from DESC LIMIT 1), 0)), 0)
+            FROM accruals a
+            WHERE a.accrued_category = 'POSTING' AND a.date >= ? AND a.date < ? AND a.sku IN ({placeholders})
+        """, (d_from, d_to, *skus_list))
+        cogs = cur.fetchone()[0] or 0
+        return {"rev": rev, "cogs": cogs}
 
     agg_active = agg_for(active_skus)
     agg_liq = agg_for(liq_skus)
@@ -231,7 +255,11 @@ def calc_fact(month_str):
     margin_active = (profit_active_val / agg_active["rev"] * 100) if agg_active["rev"] > 0 else 0
     conversion = (am_orders / am_impressions * 100) if am_impressions > 0 else 0
     buyout = (am_buyouts / am_orders * 100) if am_orders > 0 else 0
-    aov = (revenue_all / orders) if orders > 0 else 0
+    # Средний чек — по проданным единицам из начислений (postings_daily бывает не загружена)
+    aov = (sold_revenue / sold_units) if sold_units > 0 else 0
+    if orders == 0:
+        orders = am_orders or sold_units
+    roi = (profit / cogs_all * 100) if cogs_all > 0 else 0
     liq_share_stock = (liq_stock_value / total_stock_value * 100) if total_stock_value > 0 else 0
     active_share_revenue = (agg_active["rev"] / revenue_all * 100) if revenue_all > 0 else 0
 
@@ -254,6 +282,7 @@ def calc_fact(month_str):
         "liq_share_stock": round(liq_share_stock, 2),
         "active_share_revenue": round(active_share_revenue, 2),
         "liq_sold_skus": len(liq_skus),
+        "roi": round(roi, 2),
         "days_passed": days_passed,
         "days_in_month": days_in_month,
     }

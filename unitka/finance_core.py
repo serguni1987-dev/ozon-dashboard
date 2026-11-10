@@ -111,7 +111,7 @@ def ozon_pnl(cur, date_from: str, date_to: str) -> dict:
     ozon_total = income - net_from_ozon  # комиссия + услуги + корректировки по возвратам
 
     # Себестоимость с учётом возвратов: по месячным отчётам о реализации (закрытые месяцы),
-    # по дневной реализации — для месяцев, которых ещё нет в monthly_realization_rows.
+    # по начислениям accruals — для месяцев, которых ещё нет в monthly_realization_rows.
     m_from, m_to = date_from[:7], date_to[:7]
     # В monthly_realization_rows quantity = кол-во доставленных (delivery_commission.quantity),
     # возвраты лежат только в raw_json (return_commission.quantity); строка «только возврат»
@@ -127,28 +127,24 @@ def ozon_pnl(cur, date_from: str, date_to: str) -> dict:
     cur.execute("SELECT DISTINCT month FROM monthly_realization_rows WHERE month >= ? AND month < ?", (m_from, m_to))
     closed_months = {r[0] for r in cur.fetchall()}
 
-    # Открытые месяцы (ещё нет отчёта о реализации): realization_daily,
-    # а если и его нет — оценка по начислениям accruals (1 строка POSTING с ценой = 1 шт).
+    # Открытые месяцы (ещё нет отчёта о реализации): оценка по начислениям accruals.
+    # Строка POSTING с ценой > 0 = 1 проданная штука, с ценой < 0 = 1 возврат
+    # (проверено на сен и окт 2026: 31/1 и 14/1 — совпадает с отчётом о реализации).
+    # realization_daily здесь НЕЛЬЗЯ использовать: в ней по строке на каждое начисление
+    # (включая услуги с quantity = 1), штуки завышаются в 2–4 раза.
     cogs_daily = 0.0
     cogs_estimated = False
     cur.execute("SELECT DISTINCT substr(date,1,7) FROM accruals WHERE date >= ? AND date < ?", rng)
     for (month,) in cur.fetchall():
         if month in closed_months:
             continue
-        cur.execute("SELECT COUNT(*) FROM realization_daily WHERE substr(date,1,7) = ?", (month,))
-        if (cur.fetchone() or [0])[0] > 0:
-            cogs_daily += _one(cur, f"""
-                SELECT COALESCE(SUM(CASE WHEN r.is_return THEN -1 ELSE 1 END * r.quantity * c.cost_price), 0)
-                FROM realization_daily r
-                LEFT JOIN ({_COST_LATEST}) c ON r.sku = c.sku
-                WHERE substr(r.date,1,7) = ? AND r.date >= ? AND r.date < ?""", (month, date_from, date_to))
-        else:
-            cogs_estimated = True
-            cogs_daily += _one(cur, f"""
-                SELECT COALESCE(SUM(c.cost_price), 0)
-                FROM accruals a LEFT JOIN ({_COST_LATEST}) c ON a.sku = c.sku
-                WHERE a.accrued_category = 'POSTING' AND a.sale_price > 0
-                  AND substr(a.date,1,7) = ? AND a.date >= ? AND a.date < ?""", (month, date_from, date_to))
+        cogs_estimated = True
+        cogs_daily += _one(cur, f"""
+            SELECT COALESCE(SUM(CASE WHEN a.sale_price > 0 THEN c.cost_price
+                                     WHEN a.sale_price < 0 THEN -c.cost_price ELSE 0 END), 0)
+            FROM accruals a LEFT JOIN ({_COST_LATEST}) c ON a.sku = c.sku
+            WHERE a.accrued_category = 'POSTING'
+              AND substr(a.date,1,7) = ? AND a.date >= ? AND a.date < ?""", (month, date_from, date_to))
 
     cogs = cogs_monthly + cogs_daily
     gross_profit = net_from_ozon - cogs

@@ -5,19 +5,22 @@ import os
 import re
 import sys
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import gspread
 from google.oauth2.service_account import Credentials
 
 from . import config
+from . import settings as unit_settings, unit_core
+from .finance_core import tax_settings, ozon_pnl, REGIME_DR, REGIME_INCOME
 
 DB           = str(config.DB_PATH)
 CREDENTIALS  = str(config.CREDENTIALS)
 SHEET_ID     = config.SHEET_ID
 MARGIN_SHEET = config.MARGIN_SHEET
 SETTINGS_SHEET = config.SETTINGS_SHEET
-DEFAULT_TAX_RATE = 7.0
+DEFAULT_TAX_RATE = 5.0   # запасное значение; рабочее — НАСТРОЙКИ!B1 через finance_core.tax_settings
+MIN_TAX_PCT = 1.0        # минимальный налог УСН «доходы − расходы», % от доходов
 
 SERVICE_GROUPS = {
     "logistics": {16, 17, 28, 29, 30, 32, 38, 39, 42, 43, 44, 45, 59, 73, 98, 12},
@@ -48,7 +51,10 @@ HEADER = [
     "Прибыль, руб.", "Прибыль на ед., руб.", "Прибыль в %",
     "Наценка %",
     "Скидка на МП, руб.", "Скидка на МП на ед., руб.",
-    "Доп. расходы, руб.", "Доп. расходы на ед., руб.",
+    "Доп. расходы (общие расходы Ozon: реклама и пр.), руб.", "Доп. расходы на ед., руб.",
+    # --- добавлено 2026-11-10: точка безубыточности по цене (unit_core) ---
+    "Мин. цена (в ноль), руб.", "Мин. цена с рекламой и общими расходами, руб.",
+    "Текущая цена, руб.", "Запас до мин. цены, %",
 ]
 
 
@@ -143,6 +149,16 @@ def load_stocks(con):
     return stocks
 
 
+def _whole_months(start, end):
+    """True, если период — целые календарные месяцы (с 1-го числа по последний день месяца)."""
+    try:
+        d1 = datetime.strptime(start, "%Y-%m-%d")
+        d2 = datetime.strptime(end, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return False
+    return d1.day == 1 and (d2 + timedelta(days=1)).day == 1
+
+
 def load_period(con, start, end, stocks):
     skus = {}
 
@@ -198,12 +214,44 @@ def load_period(con, start, end, stocks):
         GROUP BY sku
     """, (start, end)):
         s = ensure(r["sku"])
+        # Штуки из начислений: продано − возвращено. Это та же база, что у выручки и комиссии
+        # (и у P&L). Раньше «на ед.» и себестоимость делились на выкупы из postings_daily
+        # (по дате заказа) — выручка и штуки относились к разным отправлениям.
+        s["sold_net"] = int(_f(r["q"]))
+        s["has_realization"] = True
         s["seller_price"] = _f(r["sp"])
         s["sale_price"]   = _f(r["slp"])
         s["bonus"]        = _f(r["b"])
         s["coinvestment"] = _f(r["ci"])
         s["revenue"]      = s["sale_price"] + s["bonus"] + s["coinvestment"]
         s["commission"]   = abs(_f(r["cm"]))
+
+    # Целые месяцы: штуки, выручка и комиссия — из той же базы, что P&L (unit_core:
+    # отчёт о реализации для закрытых месяцев, начисления — для открытого). Так лист
+    # не зависит от того, полностью ли загружена realization_daily.
+    if _whole_months(start, end):
+        try:
+            nxt = (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            eco = unit_core.sku_economics(con.cursor(), start, nxt)
+            restored = 0.0
+            for sku, e in eco["skus"].items():
+                if not (e["delivered"] or e["returned"] or abs(e["income"]) > 0.005):
+                    continue
+                s = ensure(sku)
+                diff = e["income"] - s["revenue"]
+                if abs(diff) > 0.5:
+                    restored += diff
+                    s["seller_price"] = e["income"]
+                    s["sale_price"] = e["income"] - s["bonus"] - s["coinvestment"]
+                s["revenue"] = e["income"]
+                s["commission"] = e["commission"]
+                s["sold_net"] = int(round(e["units"]))
+                s["has_realization"] = True
+            if abs(restored) > 1:
+                print(f"[!] В realization_daily за период не хватает {restored:,.0f} ₽ выручки — взято из отчёта "
+                      f"о реализации. Дозагрузите: py -m unitka.load_realization_daily --from {start} --to {end} --force")
+        except Exception as e:  # noqa: BLE001
+            print(f"[!] Сверка с отчётом о реализации не выполнена: {e}")
 
     for r in con.execute("""
         SELECT sku, type_id, SUM(amount) AS t
@@ -262,6 +310,9 @@ def load_period(con, start, end, stocks):
             WHERE sku = ? AND date_from <= ?
             ORDER BY date_from DESC LIMIT 1
         """, (sku, end)).fetchone()
+        # Выкупы = проданные штуки из начислений (нетто). Отправление, доставленное в периоде,
+        # но начисленное в другом месяце, сюда не попадает — иначе была бы себестоимость без выручки.
+        s["purchased"] = s.get("sold_net", 0)
         s["cogs"] = (_f(row[0]) if row and row[0] else 0.0) * s["purchased"]
 
         p = con.execute(
@@ -312,9 +363,16 @@ def calc_derived(s):
     s["margin_u"] = (s["margin"] / d) if d else 0.0
     s["margin_pct"] = (s["margin"] / s["revenue"] * 100.0) if s["revenue"] else 0.0
 
-    s["tax_base"]   = s["sale_price"]
+    # Налог по режиму из НАСТРОЕК (B4). «Доходы»: ставка × доход (цена + баллы + софинансирование).
+    # «Доходы − расходы»: ставка × маржа, но не меньше минимального налога 1 % от дохода.
+    if s.get("tax_regime") == REGIME_INCOME:
+        s["tax_base"] = s["revenue"]
+        s["tax"]      = s["tax_base"] * s["tax_rate"] / 100.0
+    else:
+        s["tax_base"] = max(s["margin"], 0.0)
+        s["tax"]      = max(s["tax_base"] * s["tax_rate"] / 100.0,
+                            max(s["revenue"], 0.0) * MIN_TAX_PCT / 100.0)
     s["tax_base_u"] = (s["tax_base"] / d) if d else 0.0
-    s["tax"]        = s["tax_base"] * s["tax_rate"] / 100.0
     s["tax_u"]      = (s["tax"] / d) if d else 0.0
 
     s["profit"]     = s["margin"] - s["tax"]
@@ -329,21 +387,79 @@ def calc_derived(s):
     return s
 
 
-def build(start, end, tax_rate):
+def load_min_prices(con, end, tax, unit):
+    """Мин. цены по SKU из unit_core (база — год, в который попадает конец периода)."""
+    try:
+        year = int(str(end)[:4])
+        cur = con.cursor()
+        eco = unit_core.sku_economics(cur, f"{year}-01-01", f"{year + 1}-01-01")
+        return unit_core.min_prices(cur, eco, tax, unit)
+    except Exception as e:  # noqa: BLE001
+        print(f"[!] Мин. цены не посчитаны: {e}")
+        return {}
+
+
+def build(start, end, tax_rate, tax=None, unit=None):
     con = sqlite3.connect(DB)
     con.row_factory = sqlite3.Row
     stocks = load_stocks(con)
     print(f"Период: {start} .. {end}, остатков в current_stocks: {len(stocks)}")
 
     data = load_period(con, start, end, stocks)
+    regime = (tax or {}).get("regime", REGIME_DR)
+    floors = load_min_prices(con, end, tax or {"rate_pct": tax_rate, "regime": regime}, unit)
+    # Все удержания Ozon за период (как в P&L) — чтобы разнести по товарам то, что к товару
+    # не привязано: рекламу, подписки, штрафы, баллы за отзывы.
+    ozon_total = None
+    try:
+        nxt = (datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        ozon_total = ozon_pnl(con.cursor(), start, nxt)["ozon_total"]
+    except Exception as e:  # noqa: BLE001
+        print(f"[!] Общие расходы Ozon не посчитаны: {e}")
     con.close()
 
     items = []
     for s in data.values():
         s["tax_rate"] = tax_rate
+        s["tax_regime"] = regime
         s = calc_derived(s)
-        if s["orders"] > 0 or s["purchased"] > 0:
+        try:
+            fl = floors.get(int(s["sku"]), {})
+        except (TypeError, ValueError):
+            fl = {}
+        s["min_direct"] = fl.get("min_direct")
+        s["min_full"]   = fl.get("min_full")
+        s["cur_price"]  = fl.get("price") or 0.0
+        s["headroom"]   = fl.get("headroom_pct")
+        if s["orders"] > 0 or s["purchased"] > 0 or abs(s["revenue"]) > 0.005 or s["total_mp"] > 0.005:
             items.append(s)
+
+    # «Доп. расходы» = общие расходы Ozon, не привязанные к товару, распределены по выручке.
+    # Без них сумма прибыли по листу была выше P&L на всю рекламу и прочие общие удержания.
+    if ozon_total is not None:
+        allocated = sum(s["total_mp"] for s in data.values())
+        rev_total = sum(s["revenue"] for s in data.values() if s["revenue"] > 0)
+        unallocated = ozon_total - allocated
+        if rev_total > 0 and abs(unallocated) > 0.5:
+            for s in data.values():
+                if s["revenue"] <= 0:
+                    continue
+                d = s["purchased"] or 0
+                s["extras"] = unallocated * s["revenue"] / rev_total
+                s["extras_u"] = (s["extras"] / d) if d else 0.0
+                net = s["margin"] - s["extras"]
+                if regime == REGIME_INCOME:
+                    s["tax_base"] = s["revenue"]
+                    s["tax"] = s["tax_base"] * tax_rate / 100.0
+                else:
+                    s["tax_base"] = max(net, 0.0)
+                    s["tax"] = max(s["tax_base"] * tax_rate / 100.0, s["revenue"] * MIN_TAX_PCT / 100.0)
+                s["tax_base_u"] = (s["tax_base"] / d) if d else 0.0
+                s["tax_u"] = (s["tax"] / d) if d else 0.0
+                s["profit"] = net - s["tax"]
+                s["profit_u"] = (s["profit"] / d) if d else 0.0
+                s["profit_pct"] = s["profit"] / s["revenue"] * 100.0
+            print(f"[OK] Общие расходы Ozon {unallocated:,.0f} ₽ распределены по выручке (колонка «Доп. расходы»)")
 
     items.sort(key=lambda x: x["profit"], reverse=True)
 
@@ -374,6 +490,10 @@ def build(start, end, tax_rate):
             round(s["markup_pct"], 2),
             round(s["bonus"], 2), round(s["bonus_u"], 2),
             round(s["extras"], 2), round(s["extras_u"], 2),
+            round(s["min_direct"], 2) if s["min_direct"] else "",
+            round(s["min_full"], 2) if s["min_full"] else "",
+            round(s["cur_price"], 2) if s["cur_price"] else "",
+            round(s["headroom"], 2) if s["headroom"] is not None else "",
         ])
     return rows
 
@@ -398,7 +518,7 @@ def apply_format(ws, n_rows):
     NAVY = {"red": 0.10, "green": 0.18, "blue": 0.35}
 
     reqs.append({"repeatCell": {
-        "range": grid("A1:AV1"),
+        "range": grid("A1:AZ1"),
         "cell": {"userEnteredFormat": {
             "backgroundColor": GREY,
             "textFormat": {"foregroundColor": NAVY, "bold": True, "fontSize": 10},
@@ -413,13 +533,15 @@ def apply_format(ws, n_rows):
     PCT = '0.00" %"'
     for rng in (f"E2:E{n_rows}", f"H2:H{n_rows}", f"J2:J{n_rows}", f"N2:AA{n_rows}",
                 f"AC2:AF{n_rows}", f"AG2:AH{n_rows}",
-                f"AK2:AL{n_rows}", f"AM2:AN{n_rows}", f"AO2:AP{n_rows}", f"AS2:AV{n_rows}"):
+                f"AK2:AL{n_rows}", f"AM2:AN{n_rows}", f"AO2:AP{n_rows}", f"AS2:AV{n_rows}",
+                f"AW2:AY{n_rows}"):
         reqs.append({"repeatCell": {
             "range": grid(rng),
             "cell": {"userEnteredFormat": {"numberFormat": {
                 "type": "NUMBER", "pattern": RUB}}},
             "fields": "userEnteredFormat.numberFormat"}})
-    for rng in (f"K2:K{n_rows}", f"AB2:AB{n_rows}", f"AI2:AI{n_rows}", f"AJ2:AJ{n_rows}", f"AQ2:AR{n_rows}"):
+    for rng in (f"K2:K{n_rows}", f"AB2:AB{n_rows}", f"AI2:AI{n_rows}", f"AJ2:AJ{n_rows}", f"AQ2:AR{n_rows}",
+                f"AZ2:AZ{n_rows}"):
         reqs.append({"repeatCell": {
             "range": grid(rng),
             "cell": {"userEnteredFormat": {"numberFormat": {
@@ -452,7 +574,10 @@ def main():
     sh = client.open_by_key(SHEET_ID)
 
     st = read_settings(sh)
-    tax_rate = st["tax_rate"]
+    tax = tax_settings(sh)                 # ставка, режим УСН, взносы — НАСТРОЙКИ B1, B4, B5
+    tax_rate = tax["rate_pct"]
+    unit = unit_settings.unit_params(sh)   # целевая маржа, общие расходы — НАСТРОЙКИ
+    print(f"[OK] Налог: {tax['regime']}, {tax_rate}%")
 
     start = cli["from"] or st["from"] or f"{date.today().year}-01-01"
     end   = cli["to"]   or st["to"]   or f"{date.today().year}-12-31"
@@ -460,7 +585,7 @@ def main():
     print(f"ЮНИТ-ЭКОНОМИКА {start} .. {end}")
     print("=" * 80)
 
-    rows = build(start, end, tax_rate)
+    rows = build(start, end, tax_rate, tax, unit)
     print(f"SKU в таблице: {len(rows) - 1}")
 
     if cli["local"]:
@@ -479,6 +604,8 @@ def main():
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=MARGIN_SHEET, rows=3000, cols=50)
 
+    if ws.col_count < len(HEADER) or ws.row_count < len(rows) + 1:
+        ws.resize(rows=max(ws.row_count, len(rows) + 1), cols=max(ws.col_count, len(HEADER)))
     ws.clear()
     ws.update(values=rows, range_name="A1", value_input_option="USER_ENTERED")
     print(f"Записано строк: {len(rows)}")

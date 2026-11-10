@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from .db import connect
 from .calc_taxes import build as build_taxes
 from .finance_core import ozon_pnl, month_range, year_range, receivables as calc_receivables, tax_settings
+from . import settings
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRED = os.path.join(APP_DIR, "app", "credentials.json")
@@ -12,22 +13,9 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapi
 SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
 
 def get_manual_inputs(sh):
-    cash, ap = 0.0, 0.0
-    try:
-        ws = sh.worksheet("Ручной ввод")
-        vals = ws.get_all_values()
-        for row in vals:
-            if len(row) < 2: continue
-            key = row[0].strip().lower()
-            val_str = row[1].replace(" ", "").replace(",", ".").strip()
-            if not val_str or val_str == "значение": continue
-            try: val = float(val_str)
-            except: continue
-            if "деньги" in key or "счет" in key: cash = val
-            elif "кредиторка" in key or "поставщик" in key: ap = val
-    except Exception:
-        pass
-    return cash, ap
+    """Деньги на счёте и кредиторка — лист НАСТРОЙКИ (unitka.settings)."""
+    m = settings.manual_inputs(sh)
+    return m["cash"], m["ap"]
 
 def main():
     creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)

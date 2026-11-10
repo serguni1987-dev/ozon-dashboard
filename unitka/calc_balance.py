@@ -3,6 +3,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 from .db import connect
 from .finance_core import receivables as calc_receivables, inventory_value, tax_settings
+from . import settings
 from .calc_taxes import build as build_taxes
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -11,34 +12,9 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapi
 SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
 
 def get_manual_inputs(sh):
-    cash, ap, tax_paid = 0.0, 0.0, 0.0
-    try:
-        ws = sh.worksheet("Ручной ввод")
-        vals = ws.get_all_values()
-        for row in vals:
-            if len(row) < 2:
-                continue
-            key = row[0].strip().lower()
-            val_str = row[1].replace(" ", "").replace(",", ".").strip()
-            
-            if not val_str or val_str == "значение":
-                continue
-                
-            try:
-                val = float(val_str)
-            except ValueError:
-                continue
-
-            if "деньги" in key or "счет" in key:
-                cash = val
-            elif "кредиторка" in key or "поставщик" in key:
-                ap = val
-            elif "налог" in key or "уплачено" in key:
-                tax_paid = val
-                
-    except Exception as e:
-        print(f"Ошибка чтения Ручной ввод: {e}")
-    return cash, ap, tax_paid
+    """Деньги на счёте, кредиторка, уплаченные налоги — лист НАСТРОЙКИ (unitka.settings)."""
+    m = settings.manual_inputs(sh)
+    return m["cash"], m["ap"], m["tax_paid"]
 
 def build(tax_paid, settings=None):
     conn = connect()

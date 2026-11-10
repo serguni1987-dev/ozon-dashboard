@@ -1,5 +1,7 @@
-﻿# Переход в рабочую папку
-Set-Location -Path "C:\Users\sergu\Desktop\проект"
+﻿# Переход в рабочую папку: проект = папка на уровень выше этого файла (app\daily_update.ps1).
+# Раньше путь был зашит (C:\Users\sergu\Desktop\проект) — скрипт не работал из другой папки.
+$ProjectRoot = Split-Path -Parent $PSScriptRoot
+Set-Location -Path $ProjectRoot
 
 # === CHARSET: UTF-8 для Python и консоли (PS 5.1 не наследует [Console]::OutputEncoding) ===
 chcp 65001 | Out-Null
@@ -9,7 +11,7 @@ $env:PYTHONIOENCODING = "utf-8"
 $env:PYTHONUTF8 = "1"
 
 # === LOCK FILE: защита от параллельного запуска (PID-based) ===
-$lockPath = "C:\Users\sergu\Desktop\проект\app\daily_update.lock"
+$lockPath = Join-Path $ProjectRoot "app\daily_update.lock"
 if (Test-Path $lockPath) {
     $lockPid = (Get-Content $lockPath -ErrorAction SilentlyContinue | Select-Object -First 1)
     $alive = $false
@@ -95,9 +97,25 @@ if (-not $pingResult.TcpTestSucceeded) {
 }
 Write-Host "VPN работает, продолжаем." -ForegroundColor Green
 
+# === 0. ЗАГРУЗКА ДАННЫХ ИЗ OZON API (до расчётов, чтобы все листы считались по свежей базе) ===
+Write-Host "[0/14] Загрузка начислений, отправлений, цен и остатков из Ozon..." -ForegroundColor Yellow
+$FromDate = (Get-Date).AddDays(-7).ToString("yyyy-MM-dd")
+$ToDate = Get-Date -Format "yyyy-MM-dd"
+python -m unitka.load_realization_daily --from $FromDate --to $ToDate --force
+python -m unitka.load_postings --from $FromDate --to $ToDate
+# Текущие цены и остатки нужны для «МИН. ЦЕНЫ» (Юнит-сводка, Юнит экономика, ПУЛЬТ).
+Set-Location (Join-Path $ProjectRoot "app")
+if (-not (Invoke-CmdRetry "py" @("fetch_current_prices.py") -MaxAttempts 1)) {
+    Write-Host "  Цены не обновлены — мин. цены сравниваются со старой ценой." -ForegroundColor Yellow
+}
+if (-not (Invoke-CmdRetry "py" @("fetch_current_stocks.py") -MaxAttempts 1)) {
+    Write-Host "  Остатки не обновлены." -ForegroundColor Yellow
+}
+Set-Location $ProjectRoot
+
 # === 1. P&L ===
 Write-Host "[1/14] P&L (старый пайплайн)..." -ForegroundColor Yellow
-Set-Location "C:\Users\sergu\Desktop\проект\app"
+Set-Location (Join-Path $ProjectRoot "app")
 $step1ok = $true
 if (-not (Invoke-CmdRetry "py" @("sync_finance.py")))          { $step1ok = $false }
 if (-not (Invoke-CmdRetry "py" @("sync_monthly.py")))          { $step1ok = $false }
@@ -110,18 +128,11 @@ if (-not $step1ok) {
 
 # === 2. ФИНАНСОВЫЙ ПАЙПЛАЙН ===
 Write-Host "[2/14] Финансовый пайплайн (unitka)..." -ForegroundColor Yellow
-Set-Location "C:\Users\sergu\Desktop\проект"
+Set-Location $ProjectRoot
 if (-not (Invoke-PyRetry "unitka.run_finance" @("--days","7"))) {
     Write-Host "  run_finance пропущен после повторов." -ForegroundColor Red
 }
 
-
-# === ЗАГРУЗКА ДАННЫХ ИЗ OZON API ===
-Write-Host "[New] Загрузка начислений и отправлений из Ozon..." -ForegroundColor Yellow
-$FromDate = (Get-Date).AddDays(-7).ToString("yyyy-MM-dd")
-$ToDate = Get-Date -Format "yyyy-MM-dd"
-python -m unitka.load_realization_daily --from $FromDate --to $ToDate --force
-python -m unitka.load_postings --from $FromDate --to $ToDate
 
 # === 3. КОНТЕНТ-РЕЙТИНГИ ===
 Write-Host "[3/14] Загрузка контент-рейтингов..." -ForegroundColor Yellow
@@ -161,16 +172,16 @@ if (-not (Invoke-PyRetry "unitka.calc_returns")) {
     Write-Host "  unitka.calc_returns пропущен после повторов." -ForegroundColor Red
 }
 
-# === 11. СТРАТЕГИИ ===
-Write-Host "[11/14] Стратегии..." -ForegroundColor Yellow
-if (-not (Invoke-PyRetry "unitka.calc_strategy")) {
-    Write-Host "  unitka.calc_strategy пропущен после повторов." -ForegroundColor Red
-}
-
-# === 12. ПЛАН/ФАКТ И KPI ===
-Write-Host "[12/14] План/Факт и KPI..." -ForegroundColor Yellow
+# === 11. ПЛАН/ФАКТ И KPI (до стратегий: стратегии читают лист KPI) ===
+Write-Host "[11/14] План/Факт и KPI..." -ForegroundColor Yellow
 if (-not (Invoke-PyRetry "unitka.calc_plan_fact")) {
     Write-Host "  unitka.calc_plan_fact пропущен после повторов." -ForegroundColor Red
+}
+
+# === 12. СТРАТЕГИИ ===
+Write-Host "[12/14] Стратегии..." -ForegroundColor Yellow
+if (-not (Invoke-PyRetry "unitka.calc_strategy")) {
+    Write-Host "  unitka.calc_strategy пропущен после повторов." -ForegroundColor Red
 }
 
 # === 13. БЭКАП БД ===

@@ -340,15 +340,16 @@ def get_pnl_for_month(month, tax):
 
     if is_open_month and cogs == 0:
         # Отчёта о реализации ещё нет — оценка: каждая строка начисления POSTING
-        # с ценой = 1 проданная штука по текущей себестоимости.
+        # с ценой > 0 = 1 проданная штука, с ценой < 0 = 1 возврат (по текущей себестоимости).
         r_est = con.execute("""
-            SELECT COALESCE(SUM(c.cost_price), 0)
+            SELECT COALESCE(SUM(CASE WHEN a.sale_price > 0 THEN c.cost_price
+                                     WHEN a.sale_price < 0 THEN -c.cost_price ELSE 0 END), 0)
             FROM accruals a
             LEFT JOIN (SELECT sku, cost_price FROM product_cost_history
                        WHERE (sku, date_from) IN (SELECT sku, MAX(date_from)
                                                   FROM product_cost_history GROUP BY sku)) c
               ON a.sku = c.sku
-            WHERE a.accrued_category = 'POSTING' AND a.sale_price > 0
+            WHERE a.accrued_category = 'POSTING'
               AND substr(a.date, 1, 7) = ?
         """, (month,)).fetchone()
         cogs = f(r_est[0])
@@ -667,6 +668,44 @@ def restore_operational(ws, saved):
     print(f"[OK] Восстановлено ручных значений: {len(saved)}")
 
 
+# Строки P&L, которые заполняются из блока «РАСХОДЫ ПО МЕСЯЦАМ» листа НАСТРОЙКИ
+MANUAL_ROWS = ((37, "staff"), (38, "admin"), (39, "commercial"), (48, "personal"))
+
+
+def read_manual_expenses(sh):
+    """Ручные расходы по месяцам с листа НАСТРОЙКИ (читает unitka/settings.py).
+    Возвращает {месяц: {staff, admin, commercial, personal, …}} или None, если блока нет."""
+    try:
+        project = os.path.dirname(APP_DIR)
+        if not sys.path or sys.path[0] != project:
+            sys.path.insert(0, project)
+        from unitka import settings as pult_settings
+        return pult_settings.outflows(sh)
+    except Exception as e:  # noqa: BLE001
+        print(f"[i] Блок «РАСХОДЫ ПО МЕСЯЦАМ» не прочитан ({e}) — строки 37–39 остаются ручными")
+        return None
+
+
+def apply_manual_expenses(ws, block):
+    """Пишет персонал / административные / коммерческие (строки 37–39) и личные выводы
+    (строка 48 «Выплата дивидендов») со знаком минус. Пустые ячейки блока не трогают то,
+    что введено в P&L вручную."""
+    if not block:
+        return
+    updates = []
+    for row, key in MANUAL_ROWS:
+        for m in range(1, 13):
+            val = (block.get(m) or {}).get(key) or 0.0
+            if val:
+                updates.append({"range": f"{col_letter(3 + m)}{row}", "values": [[-abs(val)]]})
+    if not updates:
+        print("[i] НАСТРОЙКИ → «Расходы по месяцам»: персонал/административные/коммерческие/личные не заполнены")
+        return
+    updates.append({"range": "B48", "values": [["=SUM(D48:O48)"]]})
+    ws.batch_update(updates, value_input_option="USER_ENTERED")
+    print(f"[OK] Расходы из НАСТРОЕК перенесены в P&L: {len(updates) - 1} ячеек (строки 37–39, 48)")
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     year = int(args[0]) if args else 2026
@@ -705,6 +744,7 @@ def main():
     ws.clear()
     ws.update(values=rows, range_name="A1", value_input_option="USER_ENTERED")
     restore_operational(ws, saved_op)
+    apply_manual_expenses(ws, read_manual_expenses(sh))
     print(f"Записано строк: {len(rows)}")
 
     # Стилизация — в PNL/pnl_format.py

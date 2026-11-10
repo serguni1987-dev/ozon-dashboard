@@ -9,6 +9,7 @@ from .db import connect
 from . import report_layout as rl
 from .calc_taxes import build as build_taxes
 from .finance_core import receivables as calc_receivables, inventory_value, tax_settings
+from . import settings, unit_core
 from . import calc_funnel
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -19,27 +20,8 @@ SHEET_TITLE = "ПУЛЬТ"
 
 
 def get_manual_inputs(sh):
-    cash = 0.0
-    try:
-        ws = sh.worksheet("Ручной ввод")
-        vals = ws.get_all_values()
-        for row in vals:
-            if len(row) < 2:
-                continue
-            key = row[0].strip().lower()
-            val_str = row[1].replace(" ", "").replace(",", ".").strip()
-            if not val_str or val_str == "значение":
-                continue
-            try:
-                val = float(val_str)
-            except ValueError:
-                continue
-            if "деньги" in key or "счет" in key:
-                cash = val
-    except Exception:
-        pass
-    return cash
-
+    """Деньги на счёте — лист НАСТРОЙКИ (unitka.settings)."""
+    return settings.manual_inputs(sh)["cash"]
 
 def _load_position_trends():
     conn = connect()
@@ -85,9 +67,10 @@ def _load_purchase_recommendations():
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT sku, forecast_qty, forecast_revenue
-            FROM forecast WHERE forecast_qty > 0
-            ORDER BY forecast_qty DESC LIMIT 5
+            SELECT COALESCE(NULLIF(p.offer_id, ''), f.sku), f.forecast_qty, f.forecast_revenue
+            FROM forecast f LEFT JOIN products p ON p.sku = CAST(f.sku AS INTEGER)
+            WHERE f.forecast_qty > 0
+            ORDER BY f.forecast_qty DESC LIMIT 5
         """)
         data = [{"sku": r[0], "qty": r[1], "revenue": r[2]} for r in cur.fetchall()]
     except Exception:
@@ -240,33 +223,16 @@ def build(sh):
         cur.execute("SELECT COUNT(*) FROM abc_xyz WHERE period = ? AND xyz_class = 'N/A' AND active_months >= 3", (period,))
         episodic = cur.fetchone()[0]
 
-    # --- 2. УБЫТОЧНЫЕ SKU ---
-    active_skus = set()
+    # --- 2. ЦЕНА НИЖЕ МИНИМАЛЬНОЙ (unit_core: сходится с P&L, учитывает комиссию и возвраты) ---
+    # Раньше здесь был расчёт «выручка − себестоимость − расходы» по realization_daily:
+    # штуки завышались в 2–3 раза, комиссия не учитывалась → ложное «теряете 787 940 ₽».
     cur.execute("SELECT MAX(date) FROM stock_daily")
     last_date = cur.fetchone()[0]
-    if last_date:
-        cur.execute("SELECT sku FROM stock_daily WHERE date = ? AND (fbo_present + fbs_present) > 0", (last_date,))
-        for r in cur.fetchall(): active_skus.add(str(r[0]))
-    cur.execute("SELECT DISTINCT sku FROM realization_daily WHERE date >= date('now', '-30 days') AND is_return = 0")
-    for r in cur.fetchall(): active_skus.add(str(r[0]))
-
-    cur.execute("""
-        SELECT r.sku, SUM(r.sale_price + r.bonus + r.coinvestment) AS revenue,
-               SUM(CASE WHEN r.is_return = 0 THEN r.quantity * c.cost_price ELSE 0 END) AS cogs,
-               SUM(ABS(s.amount)) AS ozon_exp
-        FROM realization_daily r
-        LEFT JOIN (SELECT sku, cost_price FROM product_cost_history WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)) c ON r.sku = c.sku
-        LEFT JOIN accrual_sku_daily s ON r.sku = s.sku AND r.date = s.date
-        WHERE r.date LIKE '2026-%' GROUP BY r.sku
-    """)
-    loss_skus_count = 0
-    total_loss = 0.0
-    for sku, rev, cogs, exp in cur.fetchall():
-        if str(sku) in active_skus:
-            p = rev - cogs - exp
-            if p < 0:
-                loss_skus_count += 1
-                total_loss += abs(p)
+    try:
+        price_alerts = unit_core.price_alerts(cur, tax_settings(sh), settings.unit_params(sh))
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] Мин. цены не посчитаны: {exc}")
+        price_alerts = {"below": [], "thin": [], "below_all": {}, "loss_per_stock": 0.0}
 
     # --- 3. НЕЛИКВИД ---
     non_liquid = 0.0
@@ -363,8 +329,17 @@ def build(sh):
 
     # --- 6. ФИНАНСОВЫЕ ПРОБЛЕМЫ ---
     actions = []
-    if total_loss > 0:
-        actions.append({"cost": total_loss, "text": f"🔴 Убыточные SKU ({loss_skus_count} шт): Теряете {total_loss:,.0f} ₽. Поднять цены или снять с продажи."})
+    below = price_alerts["below"]
+    if below:
+        top = "; ".join(f"{r['offer_id']} {r['price']:,.0f} → {r['min_direct']:,.0f} ₽" for r in below[:5])
+        more = f" и ещё {len(below) - 5}" if len(below) > 5 else ""
+        actions.append({"cost": price_alerts["loss_per_stock"] + 1e9,
+                        "text": f"🔴 Цена ниже минимальной у {len(below)} товаров на складе — каждая продажа в убыток "
+                                f"(на остатке это −{price_alerts['loss_per_stock']:,.0f} ₽). Поднять цену: {top}{more}. "
+                                f"Полный список — лист «Юнит-сводка», колонка «МИН. ЦЕНА»."})
+    if price_alerts["thin"]:
+        actions.append({"cost": 0.5, "text": f"🟡 Ещё {len(price_alerts['thin'])} товаров продаются выше минимума, но не покрывают "
+                                             f"рекламу и общие расходы Ozon — см. «Юнит-сводка», колонка «Мин. цена с рекламой»."})
     if cash_gap > 0:
         actions.append({"cost": cash_gap, "text": f"🔴 Кассовый разрыв: Не хватает {cash_gap:,.0f} ₽. Ближайший платёж: {next_payment}"})
     if non_liquid > 0:
@@ -393,6 +368,7 @@ def build(sh):
         "funnel_total_imp": total_imp, "funnel_total_ord": total_ord,
         "funnel_conv": conv_total, "funnel_c_cart": c_cart,
         "purchases": _load_purchase_recommendations(),
+        "price_below": price_alerts.get("below_all", {}),
         "strategies": _load_strategies(sh),
         "kpi_deviations": _load_kpi_deviations(sh),
         "next_payment": next_payment,
@@ -461,6 +437,12 @@ def main():
     values.append(["ЗАКУПКИ (топ-5)", "", "", "", ""])
     if res["purchases"]:
         for p in res["purchases"]:
+            below = res.get("price_below", {}).get(str(p["sku"]))
+            if below:
+                # Спрос есть, но товар продаётся в убыток — закупка только увеличит потери.
+                values.append([f"⛔ {p['sku']}: спрос {p['qty']:.0f} шт, но цена {below[0]:,.0f} ₽ ниже минимальной "
+                               f"{below[1]:,.0f} ₽ — не закупать, пока цена не поднята", "", "", "", ""])
+                continue
             values.append([f"🟡 {p['sku']}: закупить {p['qty']:.0f} шт (прогноз выручки {p['revenue']:,.0f} ₽)", "", "", "", ""])
     else:
         values.append(["Нет рекомендаций по закупкам", "", "", "", ""])

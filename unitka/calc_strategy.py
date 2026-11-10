@@ -7,6 +7,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 from .db import connect
+from . import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -33,7 +34,14 @@ STRATEGY_METRICS = {
 
 
 def read_strategy(sh):
-    """Читает лист «Стратегии». Возвращает список стратегий."""
+    """Цели: блок «СТРАТЕГИЧЕСКИЕ ЦЕЛИ» листа НАСТРОЙКИ (ввод), иначе — старый лист «Стратегии».
+
+    Лист «Стратегии» — только вывод. Раньше скрипт читал цели с того же листа, куда писал
+    прогресс: после первой записи формат менялся, цели не распознавались, и лист через раз
+    сбрасывался в шаблон."""
+    block = settings.strategies(sh)
+    if block is not None:
+        return [b for b in block if b["name"]]
     try:
         ws = sh.worksheet(SHEET_TITLE)
     except gspread.WorksheetNotFound:
@@ -103,7 +111,7 @@ def calc_progress(strategies, current_kpi):
         # (для 'up' и 'down' — разная логика, но прогресс всегда 0..100)
         if direction == "up":
             # Цель: current >= target. Прогресс = current / target * 100 (но не больше 100)
-            progress = min(100, current / target * 100) if target != 0 else 100
+            progress = max(0, min(100, current / target * 100)) if target != 0 else 100
             if current >= target:
                 status = "🟢 достигнуто"
             elif progress >= 80:

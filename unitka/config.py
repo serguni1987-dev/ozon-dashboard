@@ -2,12 +2,14 @@
 import os
 from pathlib import Path
 
-PROJECT = Path(r"C:\Users\sergu\Desktop\проект")
+# Папка проекта = папка, в которой лежит unitka (раньше был зашит путь C:\Users\sergu\Desktop\проект).
+# Переопределить можно переменной окружения PULT_HOME — нужно для установки у других продавцов.
+PROJECT = Path(os.environ.get("PULT_HOME") or Path(__file__).resolve().parent.parent)
 APP     = PROJECT / "app"
 DB_PATH = APP / "ozon.db"
 
 CREDENTIALS = APP / "credentials.json"
-SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
+SHEET_ID = os.environ.get("PULT_SHEET_ID") or "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
 MARGIN_SHEET = "Юнит экономика"
 SETTINGS_SHEET = "НАСТРОЙКИ"
 
