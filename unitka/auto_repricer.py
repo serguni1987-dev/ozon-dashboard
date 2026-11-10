@@ -49,6 +49,7 @@ def get_real_prices(client, offer_ids):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--dry-run", action="store_true", help="Только показать план")
+    parser.add_argument("--limit", type=int, default=0, help="Сколько товаров обновить (0 = все)")
     args = parser.parse_args()
 
     conn = connect()
@@ -106,6 +107,13 @@ def main():
             })
 
     logger.info(f"Найдено товаров для репрайсинга: {len(tasks)}")
+    
+    # Сортируем по размеру убытка (сначала самые убыточные)
+    tasks.sort(key=lambda t: (t["min_price"] - t["old_price"]), reverse=True)
+    
+    if args.limit > 0 and len(tasks) > args.limit:
+        logger.info(f"Ограничиваем до {args.limit} самых убыточных товаров.")
+        tasks = tasks[:args.limit]
 
     if not tasks:
         logger.info("Все цены в порядке!")
