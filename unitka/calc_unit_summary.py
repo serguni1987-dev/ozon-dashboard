@@ -1,5 +1,5 @@
 ﻿"""calc_unit_summary.py — юнит-сводка по трём периодам: год, прошлый месяц, текущий."""
-import os, json, gspread
+import os, gspread
 from datetime import datetime, date, timedelta
 from google.oauth2.service_account import Credentials
 from .db import connect
@@ -11,24 +11,15 @@ SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
 
 
 def _periods():
-    """Возвращает список (название, date_from, date_to) для трёх периодов."""
     today = date.today()
-
-    # Год: 01.01 текущего года — сегодня
-    year_from = f"{today.year}-01-01"
-    year_to = today.strftime("%Y-%m-%d")
-
-    # Прошлый месяц
+    year_from, year_to = f"{today.year}-01-01", today.strftime("%Y-%m-%d")
     prev_end = today.replace(day=1) - timedelta(days=1)
     prev_from = prev_end.replace(day=1).strftime("%Y-%m-%d")
     prev_to = prev_end.strftime("%Y-%m-%d")
     prev_month_name = prev_end.strftime("%B %Y")
-
-    # Текущий месяц
     cur_from = today.replace(day=1).strftime("%Y-%m-%d")
     cur_to = today.strftime("%Y-%m-%d")
     cur_month_name = today.strftime("%B %Y")
-
     return [
         (f"ГОД {year_from} — {year_to}", year_from, year_to),
         (f"ПРОШЛЫЙ МЕСЯЦ ({prev_month_name}: {prev_from} — {prev_to})", prev_from, prev_to),
@@ -36,9 +27,18 @@ def _periods():
     ]
 
 
+def _load_offer_map(cur):
+    offer_map = {}
+    try:
+        cur.execute("SELECT ozon_sku, offer_id FROM sku_map WHERE offer_id IS NOT NULL AND offer_id != ''")
+        for r in cur.fetchall():
+            offer_map[str(r[0])] = r[1]
+    except Exception as e:
+        print(f"Ошибка чтения sku_map: {e}")
+    return offer_map
+
+
 def build_period(conn, cur, offer_map, date_from, date_to):
-    """Считает один период: список SKU + итоги."""
-    # Оригинальный SQL (проверен: даёт итог, близкий к P&L)
     cur.execute("""
         SELECT
             r.sku,
@@ -83,23 +83,10 @@ def build_period(conn, cur, offer_map, date_from, date_to):
     return {'items': items, 'totals': totals}
 
 
-def _load_offer_map(cur):
-    offer_map = {}
-    try:
-        cur.execute("SELECT ozon_sku, offer_id FROM sku_map WHERE offer_id IS NOT NULL AND offer_id != ''")
-        for r in cur.fetchall():
-            offer_map[str(r[0])] = r[1]
-    except Exception as e:
-        print(f"Ошибка чтения sku_map: {e}")
-    return offer_map
-
-
 def build():
-    """Совместимость: считает только год (как раньше)."""
     conn = connect(); cur = conn.cursor()
     offer_map = _load_offer_map(cur)
-    periods = _periods()
-    _, d_from, d_to = periods[0]
+    _, d_from, d_to = _periods()[0]
     result = build_period(conn, cur, offer_map, d_from, d_to)
     conn.close()
     return {
@@ -122,7 +109,6 @@ def main():
         blocks.append({'title': title, 'from': d_from, 'to': d_to, **b})
     conn.close()
 
-    # Google Sheets
     creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)
     client = gspread.authorize(creds)
     sh = client.open_by_key(SHEET_ID)
@@ -133,38 +119,43 @@ def main():
         ws = sh.add_worksheet(title="Юнит-сводка", rows=500, cols=12)
     ws.clear()
 
-    # === СБОРКА СТРОК ===
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
     rows = [[f"ЮНИТ-СВОДКА — обновлено {now_str}"]]
-    fmt_marks = [(0, 'title')]  # (row_index, kind)
+    fmt_marks = [(0, 'title')]
 
+    # --- ВЕРХНИЙ БЛОК: КРАТКАЯ СВОДКА ---
+    rows.append(["Период", "SKU", "Убыточных", "Выручка", "Себестоимость", "Расходы Ozon", "Прибыль", "Маржа %"])
+    fmt_marks.append((len(rows) - 1, 'items_header'))
+    
+    for block in blocks:
+        t = block['totals']
+        items = block['items']
+        margin_pct = (t['profit'] / t['revenue'] * 100) if t['revenue'] else 0
+        n_neg = sum(1 for i in items if i['profit'] < 0)
+        
+        rows.append([
+            block['title'].split('(')[0].strip(),
+            len(items), n_neg,
+            round(t['revenue'], 2), round(t['cogs'], 2),
+            round(t['exp'], 2), round(t['profit'], 2),
+            round(margin_pct, 1)
+        ])
+        fmt_marks.append((len(rows) - 1, 'totals_row'))
+    
+    rows.append([])
     rows.append([])
 
+    # --- ДЕТАЛИЗАЦИЯ ПО ПЕРИОДАМ ---
     for block in blocks:
         t = block['totals']
         items = block['items']
         margin_pct = (t['profit'] / t['revenue'] * 100) if t['revenue'] else 0
         n_neg = sum(1 for i in items if i['profit'] < 0)
 
-        # Заголовок периода
         rows.append([f"=== {block['title']} ==="])
         fmt_marks.append((len(rows) - 1, 'period'))
-
-        rows.append([f"SKU: {len(items)} | Убыточных: {n_neg} | Выручка: {t['revenue']:,.0f} ₽ | Прибыль: {t['profit']:,.0f} ₽ | Маржа: {margin_pct:.1f}%"])
-        fmt_marks.append((len(rows) - 1, 'summary'))
-
-        # Мини-итоги
-        rows.append(["Выручка", "Себестоимость", "Расходы Ozon", "Прибыль", "Маржа %"])
-        rows.append([
-            round(t['revenue'], 2), round(t['cogs'], 2),
-            round(t['exp'], 2), round(t['profit'], 2),
-            round(margin_pct, 1)
-        ])
-        fmt_marks.append((len(rows) - 2, 'totals_header'))
-        fmt_marks.append((len(rows) - 1, 'totals_row'))
         rows.append([])
 
-        # Таблица SKU
         rows.append(["Артикул", "SKU", "Выручка", "COGS", "Расходы Ozon", "Прибыль", "Мин. цена", "Маржа %", "Статус"])
         fmt_marks.append((len(rows) - 1, 'items_header'))
 
@@ -190,13 +181,11 @@ def main():
         'title':    {"red": 0.18, "green": 0.33, "blue": 0.59},
         'period':   {"red": 0.9,  "green": 0.7,  "blue": 0.4},
         'items_header': {"red": 0.9, "green": 0.9, "blue": 0.9},
-        'totals_header': {"red": 0.85, "green": 0.85, "blue": 0.85},
         'totals_row': {"red": 0.95, "green": 0.9, "blue": 0.8},
-        'summary': {"red": 1, "green": 1, "blue": 0.9},
     }
     for row_idx, kind in fmt_marks:
         color = COLORS.get(kind)
-        bold = kind in ('title', 'period', 'items_header', 'totals_header', 'summary')
+        bold = kind in ('title', 'period', 'items_header', 'totals_row')
         cell_fmt = {"textFormat": {"bold": bold}}
         if color:
             cell_fmt["backgroundColor"] = color
@@ -213,7 +202,6 @@ def main():
             "fields": "userEnteredFormat"
         }})
 
-    # Ширина колонок
     for i, w in enumerate([150, 130, 110, 110, 110, 110, 100, 90, 110]):
         reqs.append({"updateDimensionProperties": {
             "range": {"sheetId": ws.id, "dimension": "COLUMNS",
@@ -224,7 +212,7 @@ def main():
     if reqs:
         sh.batch_update({"requests": reqs})
 
-    # === ЗАПИСЬ В НАСТРОЙКИ: дата расчёта ===
+    # Обновляем статус в НАСТРОЙКАХ
     try:
         ws_s = sh.worksheet("НАСТРОЙКИ")
         ws_s.update(values=[[
@@ -233,7 +221,6 @@ def main():
     except Exception as e:
         print(f"[!] Не удалось обновить НАСТРОЙКИ: {e}")
 
-    # === ПЕЧАТЬ В КОНСОЛЬ ===
     print("=" * 60)
     print(f"ЮНИТ-СВОДКА обновлена ({now_str})")
     print("=" * 60)
