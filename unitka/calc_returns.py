@@ -1,10 +1,8 @@
-"""unitka/calc_returns.py — анализ возвратов (источник: returns_daily)."""
+﻿"""unitka/calc_returns.py — анализ возвратов (источник: postings_daily)."""
 import os
 import logging
-
 import gspread
 from google.oauth2.service_account import Credentials
-
 from .db import connect
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -21,38 +19,47 @@ def build():
     conn = connect()
     cur = conn.cursor()
 
-    # Возвраты по SKU
-    cur.execute("""
-        SELECT sku, offer_id, COUNT(*) AS cnt, SUM(quantity) AS qty, SUM(price * quantity) AS lost_rev
-        FROM returns_daily
-        WHERE sku IS NOT NULL AND sku != ''
-        GROUP BY sku
-    """)
-    returns_by_sku = {str(r[0]): {"offer_id": r[1], "cnt": r[2], "qty": r[3] or 0, "lost_rev": r[4] or 0}
-                      for r in cur.fetchall()}
+    # Загружаем offer_id
+    offer_map = {}
+    try:
+        cur.execute("SELECT ozon_sku, offer_id FROM sku_map WHERE offer_id IS NOT NULL AND offer_id != ''")
+        for r in cur.fetchall():
+            offer_map[str(r[0])] = r[1]
+    except Exception as e:
+        logger.error(f"Ошибка чтения sku_map: {e}")
 
-    # Продажи по SKU (из realization_daily — только продажи)
+    # 1. Продажи (выкупы) из postings_daily
     cur.execute("""
-        SELECT sku, COUNT(*) AS cnt, SUM(quantity) AS qty
-        FROM realization_daily
-        WHERE sku IS NOT NULL AND sku != '' AND is_return = 0
-        GROUP BY sku
+        SELECT CAST(sku AS INTEGER) AS sku, SUM(quantity) AS qty
+        FROM postings_daily
+        WHERE status = 'delivered' AND is_returned = 0
+        GROUP BY CAST(sku AS INTEGER)
     """)
-    sales_by_sku = {str(r[0]): {"cnt": r[1], "qty": r[2] or 0} for r in cur.fetchall()}
+    sales_by_sku = {str(r[0]): r[1] or 0 for r in cur.fetchall()}
+
+    # 2. Возвраты из postings_daily
+    cur.execute("""
+        SELECT CAST(sku AS INTEGER) AS sku, SUM(quantity) AS qty, SUM(price * quantity) AS lost_rev
+        FROM postings_daily
+        WHERE is_returned = 1
+        GROUP BY CAST(sku AS INTEGER)
+    """)
+    returns_by_sku = {str(r[0]): {"qty": r[1] or 0, "lost_rev": r[2] or 0} for r in cur.fetchall()}
 
     conn.close()
 
-    all_skus = set(returns_by_sku.keys()) | set(sales_by_sku.keys())
+    all_skus = set(sales_by_sku.keys()) | set(returns_by_sku.keys())
     result = []
+    
     for sku in all_skus:
-        ret = returns_by_sku.get(sku, {"offer_id": None, "cnt": 0, "qty": 0, "lost_rev": 0})
-        sal = sales_by_sku.get(sku, {"cnt": 0, "qty": 0})
-        sold = sal["qty"]
-        returned = ret["qty"]
+        sold = sales_by_sku.get(sku, 0)
+        ret_data = returns_by_sku.get(sku, {"qty": 0, "lost_rev": 0})
+        returned = ret_data["qty"]
+        lost_revenue = abs(ret_data["lost_rev"])
+
         total = sold + returned
         return_pct = (returned / total * 100) if total > 0 else 0
-        lost_revenue = abs(ret["lost_rev"])
-        lost_logistics = returned * 300
+        lost_logistics = returned * 300  # Оценка логистики возврата
         total_loss = lost_revenue + lost_logistics
 
         if returned == 0:
@@ -68,7 +75,7 @@ def build():
 
         result.append({
             "sku": sku,
-            "offer_id": ret["offer_id"] or "",
+            "offer_id": offer_map.get(sku, ""),
             "sold": sold,
             "returned": returned,
             "return_pct": round(return_pct, 1),
