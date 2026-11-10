@@ -189,6 +189,10 @@ Write-Host "[13/14] Бэкап БД..." -ForegroundColor Yellow
 python -m unitka.backup_db
 
 # === 14. ФИНАЛЬНЫЙ ПУЛЬТ ===
+
+# === ГЕНЕРАЦИЯ УМНОГО ПЛАНА ДЕЙСТВИЙ ===
+Write-Host "[New] Генерация умного плана действий..." -ForegroundColor Yellow
+python -m unitka.calc_action_plan
 Write-Host "[14/14] Финальное обновление ПУЛЬТА..." -ForegroundColor Yellow
 if (-not (Invoke-PyRetry "unitka.calc_pulse")) {
     Write-Host "  unitka.calc_pulse пропущен после повторов." -ForegroundColor Red

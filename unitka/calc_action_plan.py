@@ -117,22 +117,38 @@ def main():
     client = gspread.authorize(creds)
     sh = client.open_by_key(SHEET_ID)
     
+    # Читаем старые статусы, чтобы не потерять их при перезаписи
+    existing_statuses = {}
+    try:
+        ws_old = sh.worksheet(SHEET_TITLE)
+        old_data = ws_old.get_all_values()
+        for row in old_data[2:]: # Пропускаем заголовки
+            if len(row) >= 7:
+                # Ключ: rule_id (скрыт) + sku, но мы возьмем просто sku + problem (чтобы было уникально)
+                key = f"{row[2]}_{row[3]}"
+                existing_statuses[key] = row[6] # Колонка 6 (G) - Статус
+    except gspread.WorksheetNotFound:
+        pass
+
     try:
         ws = sh.worksheet(SHEET_TITLE)
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=SHEET_TITLE, rows=200, cols=6)
+        ws = sh.add_worksheet(title=SHEET_TITLE, rows=200, cols=7)
 
     now_str = date.today().strftime("%Y-%m-%d")
     rows = [
         [f"УМНЫЙ ПЛАН ДЕЙСТВИЙ — {now_str}"],
-        ["Срочность", "Артикул", "SKU", "Проблема", "Что делать", "Эффект, ₽"],
+        ["Срочность", "Артикул", "SKU", "Проблема", "Что делать", "Эффект, ₽", "Статус"],
         []
     ]
 
     for t in all_tasks:
         sev = "🔴 КРИТИЧНО" if t.severity == 1 else ("🟡 ВАЖНО" if t.severity == 2 else "🟢 ИНФО")
+        key = f"{t.sku}_{t.problem}"
+        status = existing_statuses.get(key, "🆕 Новая")
+        
         rows.append([
-            sev, t.offer_id, t.sku, t.problem, t.action, round(t.money_impact, 2)
+            sev, t.offer_id, t.sku, t.problem, t.action, round(t.money_impact, 2), status
         ])
 
     ws.clear()
@@ -140,10 +156,10 @@ def main():
 
     # Форматирование
     reqs = [
-        {"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 6},
+        {"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": 7},
          "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.18, "green": 0.33, "blue": 0.59}, "horizontalAlignment": "CENTER", "textFormat": {"bold": True, "fontSize": 14, "foregroundColor": {"red": 1, "green": 1, "blue": 1}}}},
          "fields": "userEnteredFormat"}},
-        {"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 6},
+        {"repeatCell": {"range": {"sheetId": ws.id, "startRowIndex": 1, "endRowIndex": 2, "startColumnIndex": 0, "endColumnIndex": 7},
          "cell": {"userEnteredFormat": {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}}},
          "fields": "userEnteredFormat"}},
         {"updateDimensionProperties": {"range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 3, "endIndex": 5}, "properties": {"pixelSize": 300}, "fields": "pixelSize"}}
@@ -152,7 +168,7 @@ def main():
 
     print(f"УСПЕХ! Найдено проблем: {len(all_tasks)}")
     print(f"Общий эффект: {sum(t.money_impact for t in all_tasks):,.0f} ₽")
-    print("Лист 'План действий' обновлен.")
+    print("Лист 'План действий' обновлен (статусы сохранены).")
 
 if __name__ == "__main__":
     main()
