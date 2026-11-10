@@ -1,4 +1,4 @@
-"""Пробуем разные методы и разные фильтры, чтобы найти наши отправления."""
+﻿"""Пробуем разные методы и разные фильтры, чтобы найти наши отправления."""
 import json
 import sys
 from .. import config
@@ -27,8 +27,7 @@ def try_method(client, path, payload):
 def main():
     day = sys.argv[1] if len(sys.argv) > 1 else "2026-09-15"
     config.check_credentials()
-    client = OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY,
-                        base=config.OZON_BASE_URL)
+    client = OzonClient()
 
     since = day + "T00:00:00Z"
     to    = day + "T23:59:59Z"

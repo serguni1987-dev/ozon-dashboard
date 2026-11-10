@@ -1,4 +1,4 @@
-"""Загрузка FBO-отправлений через /v2/posting/fbo/list."""
+﻿"""Загрузка FBO-отправлений через /v2/posting/fbo/list."""
 import argparse, json, logging, sqlite3
 from unitka import config
 from unitka.ozon_client import OzonClient
@@ -9,8 +9,7 @@ LIMIT = 1000
 
 def _client():
     config.check_credentials()
-    return OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY,
-                      base=config.OZON_BASE_URL)
+    return OzonClient()
 
 
 def _iso(d, end=False):

@@ -13,8 +13,7 @@ def main():
         return
     day = sys.argv[1]
     config.check_credentials()
-    client = OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY,
-                        base=config.OZON_BASE_URL)
+    client = OzonClient()
     accruals = client.accrual_by_day_all(day)
     out = config.PROJECT / f"dump_{day}.json"
     out.write_text(json.dumps(accruals, ensure_ascii=False, indent=2),

@@ -1,0 +1,42 @@
+Патч финансового расчёта (комиссия Ozon, ставка 5%, дебиторка, капитал в товаре)
+================================================================================
+
+Вариант А — скопировать файлы (проще):
+  скопировать папку finance_fix\unitka\*.py поверх C:\Users\sergu\Desktop\проект\unitka\
+  (8 файлов: finance_core.py — новый; calc_taxes, calc_dashboard, calc_working_capital,
+   calc_plan_fact, calc_balance, calc_pulse, load_sales_xlsx — заменяются).
+  Перед этим сделать копию папки unitka.
+
+Вариант Б — git:
+  cd C:\Users\sergu\Desktop\проект
+  git apply --check finance_fix_patch.diff
+  git apply finance_fix_patch.diff
+
+Проверка без записи в Google Sheets:
+  py -m unitka.finance_core 2026      # P&L по БД: income, commission, net, cogs, gross_profit
+  py -m unitka.calc_taxes --local     # налог: база с минусом, минимальный 1% ≈ 17 369
+
+Перезагрузить аналитику (чинит «показы = просмотры» в Воронке):
+  py -m unitka.load_sales_xlsx app\downloads\analytics_report_daily_2026-11-08_21_54.xlsx
+  (путь подставить свой; загрузка идемпотентна — старые строки перезапишутся)
+
+Пересчёт листов (порядок важен):
+  py -m unitka.calc_taxes
+  py -m unitka.calc_balance
+  py -m unitka.calc_working_capital
+  py -m unitka.calc_dashboard
+  py -m unitka.calc_plan_fact
+  py -m unitka.calc_strategy
+  py -m unitka.calc_pulse
+
+Лист НАСТРОЙКИ!B1 уже = 5. Если ставка изменится — менять только там.
+
+Что проверить после запуска:
+  Дашборд: «ГОД В УБЫТКЕ −149 тыс. (−8,6%)», октябрь −4 640 (= Точка); дебиторка ≈ 45 815.
+  Налоги: заголовок «УСН доходы − расходы 5%», к уплате 17 369.19.
+  Баланс: деньги на счёте 166 919.47 (лист «Ручной ввод» уже обновлён).
+  Воронка (после перезагрузки xlsx и run_analytics): показы ≈ 15.8 тыс., посещения ≈ 1.0 тыс. за 30 дн.
+  Пульт: «Капитал в товаре: 87 179 ₽ (в т.ч. по продающимся SKU: 6 244 ₽)».
+
+Отдельно (не в этом патче): загрузчики realization_daily / postings_daily не
+обновлялись с начала октября — проверить шаги daily_update.ps1.

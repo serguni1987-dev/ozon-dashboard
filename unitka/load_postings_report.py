@@ -1,4 +1,4 @@
-"""load_postings_report.py — выгрузка отчёта SELLER_POSTINGS из Ozon.
+﻿"""load_postings_report.py — выгрузка отчёта SELLER_POSTINGS из Ozon.
 
 Ozon отдаёт отчёт в формате CSV (BOM + ; разделитель), не XLSX.
 """
@@ -44,8 +44,7 @@ def _parse_date(s):
 
 def _client():
     config.check_credentials()
-    return OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY,
-                      base=config.OZON_BASE_URL)
+    return OzonClient()
 
 
 def create_report(client, date_from, date_to):

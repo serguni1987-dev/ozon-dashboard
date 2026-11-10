@@ -1,8 +1,8 @@
-from unitka import config
+﻿from unitka import config
 from unitka.ozon_client import OzonClient
 import json
 config.check_credentials()
-c = OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY, base=config.OZON_BASE_URL)
+c = OzonClient()
 
 payload = {
     "dir": "ASC",

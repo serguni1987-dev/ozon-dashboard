@@ -1,4 +1,4 @@
-"""FBS с миллисекундами."""
+﻿"""FBS с миллисекундами."""
 import json
 import sys
 from .. import config
@@ -8,8 +8,7 @@ from ..ozon_client import OzonClient
 def main():
     day = sys.argv[1] if len(sys.argv) > 1 else "2026-09-15"
     config.check_credentials()
-    client = OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY,
-                        base=config.OZON_BASE_URL)
+    client = OzonClient()
 
     resp = client._post("/v3/posting/fbs/list", {
         "dir": "ASC",

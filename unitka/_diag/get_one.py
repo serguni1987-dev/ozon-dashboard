@@ -1,8 +1,8 @@
-from unitka import config
+﻿from unitka import config
 from unitka.ozon_client import OzonClient
 import json
 config.check_credentials()
-c = OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY, base=config.OZON_BASE_URL)
+c = OzonClient()
 
 for pn in ["50313579-0458-1", "76421118-0054-1", "50438345-0435-1",
            "0115723697-0071-1", "25456394-0146-1"]:

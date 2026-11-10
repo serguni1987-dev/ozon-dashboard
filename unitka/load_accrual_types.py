@@ -7,8 +7,7 @@ from .ozon_client import OzonClient
 
 def main():
     config.check_credentials()
-    client = OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY,
-                        base=config.OZON_BASE_URL)
+    client = OzonClient()
     types = client.accrual_types()
     now = datetime.now().isoformat(timespec="seconds")
     con = db.connect()

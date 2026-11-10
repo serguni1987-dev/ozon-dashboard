@@ -1,4 +1,4 @@
-"""Найти в API признаки возвратов.
+﻿"""Найти в API признаки возвратов.
 
 Смотрим accrued_category в каждом accrual за месяц.
 """
@@ -20,8 +20,7 @@ def main():
     end = date(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
 
     config.check_credentials()
-    client = OzonClient(config.OZON_CLIENT_ID, config.OZON_API_KEY,
-                        base=config.OZON_BASE_URL)
+    client = OzonClient()
 
     cats = Counter()
     total = 0

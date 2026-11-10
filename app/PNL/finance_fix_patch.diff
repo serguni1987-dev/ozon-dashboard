@@ -1,0 +1,923 @@
+diff --git a/unitka/calc_balance.py b/unitka/calc_balance.py
+index fb004f3..eb53bec 100644
+--- a/unitka/calc_balance.py
++++ b/unitka/calc_balance.py
+@@ -2,12 +2,13 @@ import os
+ import gspread
+ from google.oauth2.service_account import Credentials
+ from .db import connect
++from .finance_core import receivables as calc_receivables, inventory_value, tax_rate_pct
++from .calc_taxes import build as build_taxes
+ 
+ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ CRED = os.path.join(APP_DIR, "app", "credentials.json")
+ SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
+ SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
+-TAX_RATE = 0.07
+ 
+ def get_manual_inputs(sh):
+     cash, ap, tax_paid = 0.0, 0.0, 0.0
+@@ -39,40 +40,17 @@ def get_manual_inputs(sh):
+         print(f"Ошибка чтения Ручной ввод: {e}")
+     return cash, ap, tax_paid
+ 
+-def build(tax_paid):
++def build(tax_paid, rate_pct=None):
+     conn = connect()
+     cur = conn.cursor()
+-    
+-    cur.execute("SELECT MAX(date) FROM stock_daily")
+-    last_date = cur.fetchone()[0]
+-    
+-    inventory = 0.0
+-    if last_date:
+-        cur.execute("""
+-            SELECT SUM((s.fbo_present + s.fbs_present) * c.cost_price)
+-            FROM stock_daily s
+-            JOIN product_cost_history c ON s.sku = c.sku
+-            WHERE s.date = ? 
+-              AND c.date_from = (SELECT MAX(date_from) FROM product_cost_history WHERE sku = s.sku AND date_from <= ?)
+-        """, (last_date, last_date))
+-        inventory = cur.fetchone()[0] or 0.0
+-
+-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_transactions")
+-    acc = cur.fetchone()[0]
+-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_payouts")
+-    pay = cur.fetchone()[0]
+-    receivables = acc - pay
+-
+-    cur.execute("SELECT COALESCE(SUM(sale_price), 0) AS rev, COALESCE(SUM(bonus), 0) AS bonus FROM accruals WHERE date LIKE '2026-%'")
+-    row = cur.fetchone()
+-    revenue_ytd = row[0]
+-    bonus_ytd = row[1]
+-    tax_base = revenue_ytd - bonus_ytd
+-    tax_total = tax_base * TAX_RATE
+-    tax_to_pay = max(0, tax_total - tax_paid)
+-
++    inventory = inventory_value(cur)          # остатки × себестоимость — как в Оборотном капитале и Пульте
++    receivables = calc_receivables(cur)       # фактический баланс Ozon
+     conn.close()
+-    return inventory, receivables, tax_to_pay
++
++    # Налог к уплате — из единого расчёта calc_taxes (УСН Д−Р, минимальный 1% при убытке), минус уже уплаченное
++    tax_data = build_taxes(2026, rate_pct)
++    tax_to_pay = max(0.0, tax_data['tax_to_pay'] - tax_paid)
++    return inventory, receivables, tax_to_pay, tax_data['rate_pct']
+ 
+ def main():
+     creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)
+@@ -80,7 +58,7 @@ def main():
+     sh = client.open_by_key(SHEET_ID)
+     
+     cash, ap, tax_paid = get_manual_inputs(sh)
+-    inventory, receivables, tax_to_pay = build(tax_paid)
++    inventory, receivables, tax_to_pay, rate = build(tax_paid, tax_rate_pct(sh))
+     
+     assets = inventory + receivables + cash
+     liabilities = tax_to_pay + ap
+@@ -109,7 +87,7 @@ def main():
+         ["ИТОГО АКТИВЫ", assets],
+         ["", ""],
+         ["ПАССИВЫ", "Сумма"],
+-        ["Налоги к уплате (УСН 7%)", tax_to_pay],
++        [f"Налоги к уплате (УСН Д−Р {rate:.0f}%, минимум 1%)", tax_to_pay],
+         ["Кредиторка поставщикам", ap],
+         ["ИТОГО ПАССИВЫ", liabilities],
+         ["", ""],
+diff --git a/unitka/calc_dashboard.py b/unitka/calc_dashboard.py
+index 2fa98d1..09f6504 100644
+--- a/unitka/calc_dashboard.py
++++ b/unitka/calc_dashboard.py
+@@ -4,6 +4,7 @@ from google.oauth2.service_account import Credentials
+ from datetime import datetime, timedelta
+ from .db import connect
+ from .calc_taxes import build as build_taxes
++from .finance_core import ozon_pnl, month_range, year_range, receivables as calc_receivables, tax_rate_pct
+ 
+ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ CRED = os.path.join(APP_DIR, "app", "credentials.json")
+@@ -35,7 +36,7 @@ def main():
+ 
+     cash, ap = get_manual_inputs(sh)
+     
+-    tax_data = build_taxes(2026) 
++    tax_data = build_taxes(2026, tax_rate_pct(sh))
+     real_tax = tax_data['tax_to_pay']
+     total_contrib = tax_data['total_contrib']
+     total_burden = real_tax + total_contrib
+@@ -53,51 +54,28 @@ def main():
+     prev_month_str = prev_month_dt.strftime('%Y-%m')
+     prev_month_name = months_ru[prev_month_dt.month - 1]
+ 
+-    # --- 1. Сбор данных за месяц ---
++    # --- 1. Сбор данных за месяц (единая формула finance_core: с комиссией Ozon) ---
+     def get_month_stats(m_str):
+-        cur.execute("SELECT COALESCE(SUM(sale_price + bonus + coinvestment), 0) FROM accruals WHERE date LIKE ?", (f"{m_str}-%",))
+-        rev = cur.fetchone()[0]
+-        cur.execute("SELECT COALESCE(SUM(ABS(amount)), 0) FROM finance_transactions WHERE type = 'deduction' AND date LIKE ?", (f"{m_str}-%",))
+-        exp = cur.fetchone()[0]
+-        cur.execute("""
+-            SELECT SUM(m.quantity * c.cost_price) FROM monthly_realization_rows m
+-            LEFT JOIN (SELECT sku, cost_price FROM product_cost_history WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)) c ON m.sku = c.sku
+-            WHERE m.month = ? AND m.is_return = 0
+-        """, (m_str,))
+-        cogs = cur.fetchone()[0] or 0.0
+-        
+-        profit = rev - cogs - exp
+-        margin = (profit / rev * 100) if rev > 0 else 0
+-        return {"rev": rev, "profit": profit, "margin": margin}
++        y, m = int(m_str[:4]), int(m_str[5:7])
++        p = ozon_pnl(cur, *month_range(y, m))
++        return {"rev": round(p["income"], 2), "profit": round(p["gross_profit"], 2),
++                "margin": round(p["margin_pct"], 1), "cogs_missing": p["cogs_missing"],
++                "cogs_estimated": p["cogs_estimated"]}
+ 
+     cur_stats = get_month_stats(current_month_str)
+     prev_stats = get_month_stats(prev_month_str)
+ 
+     # --- 2. Сбор данных за ГОД (YTD) ---
+     def get_ytd_stats(year_str):
+-        cur.execute("SELECT COALESCE(SUM(sale_price + bonus + coinvestment), 0) FROM accruals WHERE date LIKE ?", (f"{year_str}-%",))
+-        rev = cur.fetchone()[0]
+-        cur.execute("SELECT COALESCE(SUM(ABS(amount)), 0) FROM finance_transactions WHERE type = 'deduction' AND date LIKE ?", (f"{year_str}-%",))
+-        exp = cur.fetchone()[0]
+-        cur.execute("""
+-            SELECT SUM(m.quantity * c.cost_price) FROM monthly_realization_rows m
+-            LEFT JOIN (SELECT sku, cost_price FROM product_cost_history WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)) c ON m.sku = c.sku
+-            WHERE m.month LIKE ? AND m.is_return = 0
+-        """, (f"{year_str}-%",))
+-        cogs = cur.fetchone()[0] or 0.0
+-        
+-        profit = rev - cogs - exp
+-        margin = (profit / rev * 100) if rev > 0 else 0
+-        return {"rev": rev, "profit": profit, "margin": margin}
++        p = ozon_pnl(cur, *year_range(int(year_str)))
++        return {"rev": round(p["income"], 2), "profit": round(p["gross_profit"], 2),
++                "margin": round(p["margin_pct"], 1), "cogs_missing": p["cogs_missing"],
++                "cogs_estimated": p["cogs_estimated"]}
+ 
+     ytd_stats = get_ytd_stats(str(now.year))
+ 
+-    # --- 3. Дебиторка ---
+-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_transactions")
+-    acc = cur.fetchone()[0]
+-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_payouts")
+-    pay = cur.fetchone()[0]
+-    receivables = acc - pay
++    # --- 3. Дебиторка: фактический баланс Ozon (balance_periods), иначе начислено − выплачено ---
++    receivables = round(calc_receivables(cur), 2)
+ 
+     # --- 4. Склад и Неликвид ---
+     cur.execute("SELECT MAX(date) FROM stock_daily")
+@@ -135,8 +113,10 @@ def main():
+     # --- 5. ПЛАН СПАСЕНИЯ КАССЫ ---
+     discount_rate = 0.30 # Скидка 30% при распродаже
+     non_liquid_cash = non_liquid * (1 - discount_rate) # Сколько денег реально получим
+-    total_potential = cash + receivables + non_liquid_cash
+-    gap = total_potential - total_burden
++    total_potential = round(cash + receivables + non_liquid_cash, 2)
++    total_burden = round(total_burden, 2)
++    gap = round(total_potential - total_burden, 2)
++    non_liquid = round(non_liquid, 2); non_liquid_cash = round(non_liquid_cash, 2)
+ 
+     # --- 6. Логика рекомендаций ---
+     recommendations = []
+@@ -151,12 +131,21 @@ def main():
+     
+     if active_stats['rev'] == 0:
+         recommendations.append(("⚪ Нет данных о продажах", "В текущем и прошлом месяце нет загруженных продаж."))
++    elif active_stats['cogs_missing']:
++        recommendations.append(("⚪ Себестоимость не загружена", f"За {active_name} есть выручка {active_stats['rev']:,.0f} руб., но себестоимость = 0. Запустите load_realization_daily / load_costs — иначе маржа ложная."))
+     elif active_stats['profit'] > 0:
+         status = "🟢 Бизнес прибыльный" if active_stats['margin'] > 20 else "🟡 Низкая маржинальность"
+-        recommendations.append((status, f"Прибыль за {active_name}: {active_stats['profit']:,.0f} руб. Маржа: {active_stats['margin']:.0f}%."))
++        est = " (себестоимость — оценка, месяц не закрыт)" if active_stats['cogs_estimated'] else ""
++        recommendations.append((status, f"Прибыль за {active_name}: {active_stats['profit']:,.0f} руб. Маржа: {active_stats['margin']:.0f}%.{est}"))
+     else:
+         recommendations.append(("🔴 БИЗНЕС В УБЫТКЕ!", f"Убыток за {active_name}: {active_stats['profit']:,.0f} руб. Срочно проверьте расходы."))
+ 
++    # Итог года — чтобы месяц не скрывал годовой результат
++    if ytd_stats['profit'] < 0:
++        recommendations.append(("🔴 ГОД В УБЫТКЕ", f"Валовая прибыль {now.year} YTD: {ytd_stats['profit']:,.0f} руб. (маржа {ytd_stats['margin']:.1f}%). Налог — минимальный 1%: {real_tax:,.0f} руб."))
++    else:
++        recommendations.append(("🟢 Год прибыльный", f"Валовая прибыль {now.year} YTD: {ytd_stats['profit']:,.0f} руб. (маржа {ytd_stats['margin']:.1f}%). Налог: {real_tax:,.0f} руб."))
++
+     # Кассовый разрыв (с учетом плана спасения)
+     if gap >= 0:
+         recommendations.append(("🟢 Денег хватает на налоги", f"Даже с учетом скидки 30% на неликвид, потенциал ({total_potential:,.0f} руб.) покрывает налоги ({total_burden:,.0f} руб.)."))
+diff --git a/unitka/calc_plan_fact.py b/unitka/calc_plan_fact.py
+index 61b6074..fe751ae 100644
+--- a/unitka/calc_plan_fact.py
++++ b/unitka/calc_plan_fact.py
+@@ -123,33 +123,13 @@ def calc_fact(month_str):
+     conn = connect()
+     cur = conn.cursor()
+ 
+-    # === Выручка и COGS из accruals (ежедневные начисления) ===
+-    # Выручка из accruals
+-    cur.execute("""
+-        SELECT COALESCE(SUM(sale_price + bonus + coinvestment), 0) AS rev
+-        FROM accruals
+-        WHERE date >= ? AND date < ?
+-    """, (d_from, d_to))
+-    revenue_all = cur.fetchone()[0] or 0
+-
+-    # COGS из realization_daily (только для закрытых месяцев)
+-    cur.execute("""
+-        SELECT COALESCE(SUM(r.quantity * c.cost_price), 0) AS cogs
+-        FROM realization_daily r
+-        LEFT JOIN (
+-            SELECT sku, cost_price FROM product_cost_history
+-            WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)
+-        ) c ON r.sku = c.sku
+-        WHERE r.date >= ? AND r.date < ? AND r.is_return = 0
+-    """, (d_from, d_to))
+-    cogs_all = cur.fetchone()[0] or 0
+-
+-    # === Расходы Ozon из finance_transactions (удержания) ===
+-    cur.execute("""
+-        SELECT COALESCE(SUM(ABS(amount)), 0) FROM finance_transactions
+-        WHERE type = 'deduction' AND date >= ? AND date < ?
+-    """, (d_from, d_to))
+-    ozon_exp = cur.fetchone()[0] or 0
++    # === Выручка, COGS, расходы Ozon — единая формула finance_core (с комиссией) ===
++    from .finance_core import ozon_pnl
++    _p = ozon_pnl(cur, d_from, d_to)
++    revenue_all = _p["income"]
++    cogs_all = _p["cogs"]
++    ozon_exp = _p["ozon_total"]
++    cogs_missing = _p["cogs_missing"]
+ 
+     profit = revenue_all - cogs_all - ozon_exp
+ 
+@@ -322,7 +302,11 @@ def write_kpi(sh, month_str, plan_total, fact):
+         if plan_val is None:
+             values.append([name, "—", round(fact_val, 2), "—", "—", "—", "—"])
+             continue
+-        forecast_val = forecast_month(fact_val, fact["days_passed"], fact["days_in_month"])
++        # Доли и проценты (маржа, ДРР, конверсия, выкупаемость, CCC, AOV) не экстраполируются на месяц
++        if unit in ("%", "дн", "дней") or key in ("aov", "ccc"):
++            forecast_val = fact_val
++        else:
++            forecast_val = forecast_month(fact_val, fact["days_passed"], fact["days_in_month"])
+         delta_abs = fact_val - plan_val
+         delta_pct = (delta_abs / plan_val * 100) if plan_val != 0 else 0
+         status = status_for(forecast_val, plan_val, direction)
+diff --git a/unitka/calc_pulse.py b/unitka/calc_pulse.py
+index 9bc41cd..e98ecc9 100644
+--- a/unitka/calc_pulse.py
++++ b/unitka/calc_pulse.py
+@@ -8,6 +8,7 @@ import calendar
+ from .db import connect
+ from . import report_layout as rl
+ from .calc_taxes import build as build_taxes
++from .finance_core import receivables as calc_receivables, inventory_value, tax_rate_pct
+ from . import calc_funnel
+ 
+ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+@@ -280,14 +281,11 @@ def build(sh):
+         non_liquid = cur.fetchone()[0] or 0.0
+ 
+     # --- 4. ДЕБИТОРКА ---
+-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_transactions")
+-    acc = cur.fetchone()[0]
+-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_payouts")
+-    pay = cur.fetchone()[0]
+-    receivables = acc - pay
++    receivables = calc_receivables(cur)       # фактический баланс Ozon
++    stock_capital = inventory_value(cur)      # весь товар на складах × себестоимость (как в Балансе)
+     conn.close()
+ 
+-    tax_data = build_taxes(2026)
++    tax_data = build_taxes(2026, tax_rate_pct(sh))
+     total_burden = tax_data["tax_to_pay"] + tax_data["total_contrib"]
+     cash = get_manual_inputs(sh)
+     cash_gap = 0.0
+@@ -389,7 +387,7 @@ def build(sh):
+ 
+     return {
+         "period": period, "data": data, "profits": profits, "capitals": capitals,
+-        "total_profit": total_profit, "total_capital": total_capital,
++        "total_profit": total_profit, "total_capital": total_capital, "stock_capital": stock_capital,
+         "low_hist": low_hist, "episodic": episodic,
+         "actions": actions, "funnel_plan": funnel_plan,
+         "funnel_total_imp": total_imp, "funnel_total_ord": total_ord,
+@@ -481,7 +479,7 @@ def main():
+         f"C: {sum(res['data']['C'].values())} SKU = {c_share}% прибыли",
+         f"Мало истории: {res['low_hist']}",
+         f"Эпизодический: {res['episodic']}",
+-        f"Капитал в товаре: {res['total_capital']:,.0f} ₽",
++        f"Капитал в товаре: {res['stock_capital']:,.0f} ₽ (в т.ч. по продающимся SKU: {res['total_capital']:,.0f} ₽)",
+     ]:
+         values.append([line, "", "", "", ""])
+     values.append(["", "", "", "", ""])
+diff --git a/unitka/calc_taxes.py b/unitka/calc_taxes.py
+index 92403cc..407ef6f 100644
+--- a/unitka/calc_taxes.py
++++ b/unitka/calc_taxes.py
+@@ -3,6 +3,7 @@ import gspread
+ from google.oauth2.service_account import Credentials
+ from .db import connect
+ from datetime import datetime
++from .finance_core import ozon_pnl, year_range, tax_rate_pct, DEFAULT_TAX_RATE_PCT
+ 
+ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ CRED = os.path.join(APP_DIR, "app", "credentials.json")
+@@ -13,72 +14,77 @@ SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
+ FIXED_IP_CONTRIB = 53658.0  # Фиксированные взносы ИП
+ LIMIT_300K = 300000.0
+ 
+-def build(year):
++def build(year, rate_pct=None):
++    """Налоги за год. rate_pct — ставка УСН «доходы − расходы» в %, по умолчанию из finance_core."""
++    rate_pct = float(rate_pct) if rate_pct else DEFAULT_TAX_RATE_PCT
+     conn = connect()
+     cur = conn.cursor()
+-    
+-    # 1. Доходы (sale_price)
+-    cur.execute("SELECT COALESCE(SUM(sale_price + bonus + coinvestment), 0) FROM accruals WHERE date LIKE ?", (f"{year}-%",))
+-    income = cur.fetchone()[0]
+-    
+-    # 2. Расходы Ozon (все удержания: комиссии, логистика, реклама)
+-    cur.execute("SELECT COALESCE(SUM(ABS(amount)), 0) FROM finance_transactions WHERE type = 'deduction' AND date LIKE ?", (f"{year}-%",))
+-    ozon_expenses = cur.fetchone()[0]
+-    
+-    # 3. Себестоимость (COGS) - упрощенный расчет
+-    # Берем количество из monthly_realization_rows и умножаем на себестоимость на конец месяца
+-    cur.execute("""
+-        SELECT SUM(m.quantity * c.cost_price)
+-        FROM monthly_realization_rows m
+-        LEFT JOIN (
+-            SELECT sku, date_from, cost_price FROM product_cost_history
+-            WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)
+-        ) c ON m.sku = c.sku
+-        WHERE m.month LIKE ? AND m.is_return = 0
+-    """, (f"{year}-%",))
+-    cogs = cur.fetchone()[0] or 0.0
+-    
+-    # 4. Расчет налоговой базы и налогов
+-    total_expenses = ozon_expenses + cogs
+-    tax_base = income - total_expenses
+-    
+-    # УСН 15% от прибыли
+-    tax_15 = max(0, tax_base * 0.15)
+-    
+-    # Минимальный налог 1% от доходов
+-    min_tax = income * 0.01
+-    
+-    # К уплате (что больше: 15% или 1%)
+-    tax_to_pay = max(tax_15, min_tax)
+-    
+-    # 5. Страховые взносы ИП
+-    # Фиксированные + 1% с превышения 300к (считаем от прибыли, так как УСН 15%)
+-    variable_contrib = max(0, (tax_base - LIMIT_300K) * 0.01)
+-    total_contrib = FIXED_IP_CONTRIB + variable_contrib
+-    
++    p = ozon_pnl(cur, *year_range(year))
+     conn.close()
+-    
++
++    income = p["income"]                 # валовые доходы (цена + баллы + партнёры)
++    commission = p["commission"]         # вознаграждение Ozon — раньше терялось
++    services = p["ozon_total"] - commission   # логистика, реклама, эквайринг, корректировки
++    ozon_expenses = p["ozon_total"]      # всё, что удержал Ozon
++    cogs = p["cogs"]
++
++    # УСН Д−Р: страховые взносы ИП — тоже расход. Фиксированные — всегда;
++    # 1% с превышения считается от (доходы − расходы без взносов) > 300 000.
++    base_before_contrib = income - ozon_expenses - cogs
++    variable_contrib = max(0.0, (base_before_contrib - LIMIT_300K) * 0.01)
++    total_contrib = FIXED_IP_CONTRIB + variable_contrib
++
++    total_expenses = ozon_expenses + cogs + total_contrib
++    tax_base = income - total_expenses
++    tax_rate = max(0.0, tax_base) * rate_pct / 100.0
++    min_tax = income * 0.01                       # минимальный налог 1% от доходов
++    tax_to_pay = max(tax_rate, min_tax)
++
+     return {
++        'rate_pct': rate_pct,
+         'income': income,
++        'commission': commission,
++        'services': services,
+         'ozon_expenses': ozon_expenses,
+         'cogs': cogs,
++        'cogs_estimated': p["cogs_estimated"],
+         'total_expenses': total_expenses,
+         'tax_base': tax_base,
+-        'tax_15': tax_15,
++        'tax_15': tax_rate,          # имя оставлено для совместимости с calc_dashboard/calc_pulse
++        'tax_rate': tax_rate,
+         'min_tax': min_tax,
+         'tax_to_pay': tax_to_pay,
++        'is_loss': tax_base < 0,
+         'fixed_contrib': FIXED_IP_CONTRIB,
+         'variable_contrib': variable_contrib,
+         'total_contrib': total_contrib
+     }
+ 
++def _print_local(data):
++    r = data['rate_pct']
++    print(f"Доходы (валовые)              {data['income']:>14,.2f}")
++    print(f"  Вознаграждение Ozon         {data['commission']:>14,.2f}")
++    print(f"  Услуги Ozon и корректировки {data['services']:>14,.2f}")
++    print(f"Себестоимость (с возвратами)  {data['cogs']:>14,.2f}{'  (оценка за открытый месяц)' if data['cogs_estimated'] else ''}")
++    print(f"Взносы ИП                     {data['total_contrib']:>14,.2f}")
++    print(f"Налоговая база                {data['tax_base']:>14,.2f}  {'УБЫТОК' if data['is_loss'] else ''}")
++    print(f"Налог {r:.0f}%                      {data['tax_rate']:>14,.2f}")
++    print(f"Минимальный 1%                {data['min_tax']:>14,.2f}")
++    print(f"К УПЛАТЕ                      {data['tax_to_pay']:>14,.2f}")
++
++
+ def main():
++    import sys
+     year = 2026
+-    data = build(year)
+-    
++    if "--local" in sys.argv:
++        _print_local(build(year))
++        return
++
+     creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)
+     client = gspread.authorize(creds)
+     sh = client.open_by_key(SHEET_ID)
++    data = build(year, tax_rate_pct(sh))
++    r = data['rate_pct']
+     
+     try:
+         ws = sh.worksheet("Налоги")
+@@ -88,7 +94,7 @@ def main():
+     ws.clear()
+     
+     # Заголовок
+-    ws.update(values=[[f"Налоги и календарь платежей за {year} год (УСН 15%)"]], range_name="A1")
++    ws.update(values=[[f"Налоги и календарь платежей за {year} год (УСН «доходы − расходы» {r:.0f}%)"]], range_name="A1")
+     try: ws.merge_cells("A1:E1")
+     except: pass
+     ws.format("A1", {"textFormat": {"bold": True, "fontSize": 14}, "horizontalAlignment": "CENTER"})
+@@ -96,27 +102,29 @@ def main():
+     # Таблица расчета
+     ws.update(values=[
+         ["Показатель", "Сумма (₽)"],
+-        ["Доходы (выручка)", data['income']],
+-        ["Расходы Ozon (комиссии, логистика)", data['ozon_expenses']],
+-        ["Себестоимость (COGS)", data['cogs']],
++        ["Доходы (валовые: цена + баллы + партнёры)", data['income']],
++        ["Вознаграждение Ozon (комиссия)", data['commission']],
++        ["Услуги Ozon (логистика, реклама, эквайринг…)", data['services']],
++        ["Себестоимость (COGS, с учётом возвратов)" + (" — оценка за открытый месяц" if data['cogs_estimated'] else ""), data['cogs']],
++        ["Страховые взносы ИП (входят в расходы при УСН Д−Р)", data['total_contrib']],
+         ["ИТОГО РАСХОДЫ", data['total_expenses']],
+-        ["Налоговая база (Доходы - Расходы)", data['tax_base']],
+-        ["Налог УСН 15%", data['tax_15']],
+-        ["Минимальный налог 1%", data['min_tax']],
+-        ["НАЛОГ К УПЛАТЕ (максимум из 15% и 1%)", data['tax_to_pay']],
++        ["Налоговая база (Доходы − Расходы)" + ("  ← УБЫТОК" if data['is_loss'] else ""), data['tax_base']],
++        [f"Налог УСН {r:.0f}%", data['tax_rate']],
++        ["Минимальный налог 1% от доходов", data['min_tax']],
++        [f"НАЛОГ К УПЛАТЕ (максимум из {r:.0f}% и 1%)", data['tax_to_pay']],
+         ["", ""],
+         ["Страховые взносы ИП (фиксированные)", data['fixed_contrib']],
+-        ["Страховые взносы ИП (1% с превышения)", data['variable_contrib']],
++        ["Страховые взносы ИП (1% с превышения 300 000)", data['variable_contrib']],
+         ["ИТОГО ВЗНОСЫ ИП", data['total_contrib']]
+     ], range_name="A3")
+-    
+-    ws.format("B4:B15", {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}})
+-    ws.format("A9:B9", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
+-    ws.format("A15:B15", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
++
++    ws.format("B4:B17", {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}})
++    ws.format("A13:B13", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
++    ws.format("A17:B17", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
+ 
+     # Календарь платежей
+-    ws.update(values=[["КАЛЕНДАРЬ ПЛАТЕЖЕЙ"]], range_name="A18")
+-    ws.format("A18", {"textFormat": {"bold": True, "fontSize": 12}})
++    ws.update(values=[["КАЛЕНДАРЬ ПЛАТЕЖЕЙ"]], range_name="A20")
++    ws.format("A20", {"textFormat": {"bold": True, "fontSize": 12}})
+     
+     ws.update(values=[
+         ["Дата", "Назначение платежа", "Сумма"],
+@@ -126,9 +134,9 @@ def main():
+         ["28.04.2027", "Итоговый налог за год", data['tax_to_pay']],
+         ["01.12.2026", "Страховые взносы ИП (1% с превышения)", data['variable_contrib']],
+         ["31.12.2026", "Фиксированные взносы ИП (можно разбить по кварталам)", data['fixed_contrib']]
+-    ], range_name="A19")
++    ], range_name="A21")
+     
+-    ws.format("C20:C25", {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}})
++    ws.format("C22:C27", {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00"}})
+     
+     print(f"Лист «Налоги» обновлен. Налог к уплате: {data['tax_to_pay']:,.2f} ₽")
+ 
+diff --git a/unitka/calc_working_capital.py b/unitka/calc_working_capital.py
+index 805b360..cee4056 100644
+--- a/unitka/calc_working_capital.py
++++ b/unitka/calc_working_capital.py
+@@ -3,6 +3,7 @@ import gspread
+ from google.oauth2.service_account import Credentials
+ from datetime import datetime
+ from .db import connect
++from .finance_core import ozon_pnl, year_range, receivables as calc_receivables, inventory_value
+ 
+ APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ CRED = os.path.join(APP_DIR, "app", "credentials.json")
+@@ -37,49 +38,18 @@ def build(sh):
+     conn = connect()
+     cur = conn.cursor()
+ 
+-    # 1. Выручка YTD
+-    cur.execute("SELECT COALESCE(SUM(sale_price), 0) FROM accruals WHERE date LIKE ?", (f"{year}-%",))
+-    revenue = cur.fetchone()[0]
+-    cur.execute("SELECT COALESCE(SUM(bonus), 0) FROM accruals WHERE date LIKE ?", (f"{year}-%",))
+-    bonus = cur.fetchone()[0]
+-    cur.execute("SELECT COALESCE(SUM(coinvestment), 0) FROM accruals WHERE date LIKE ?", (f"{year}-%",))
+-    coinv = cur.fetchone()[0]
+-
+-    # 2. Себестоимость YTD (COGS)
+-    cur.execute("""
+-        SELECT SUM(m.quantity * c.cost_price)
+-        FROM monthly_realization_rows m
+-        LEFT JOIN (
+-            SELECT sku, date_from, cost_price FROM product_cost_history
+-            WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)
+-        ) c ON m.sku = c.sku
+-        WHERE m.month LIKE ? AND m.is_return = 0
+-    """, (f"{year}-%",))
+-    cogs = cur.fetchone()[0] or 0.0
+-
+-    # 3. Текущий запас (Inventory)
+-    cur.execute("SELECT MAX(date) FROM stock_daily")
+-    last_date = cur.fetchone()[0]
+-    inventory = 0.0
+-    if last_date:
+-        cur.execute("""
+-            SELECT SUM((s.fbo_present + s.fbs_present) * c.cost_price)
+-            FROM stock_daily s
+-            JOIN product_cost_history c ON s.sku = c.sku
+-            WHERE s.date = ? AND c.date_from = (SELECT MAX(date_from) FROM product_cost_history WHERE sku = s.sku AND date_from <= ?)
+-        """, (last_date, last_date))
+-        inventory = cur.fetchone()[0] or 0.0
+-
+-    # 4. Дебиторка (Receivables)
+-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_transactions")
+-    acc = cur.fetchone()[0]
+-    cur.execute("SELECT COALESCE(SUM(amount), 0) FROM finance_payouts")
+-    pay = cur.fetchone()[0]
+-    receivables = acc - pay
+-
+-    # 5. Расходы Ozon YTD
+-    cur.execute("SELECT COALESCE(SUM(ABS(amount)), 0) FROM finance_transactions WHERE type = 'deduction' AND date LIKE ?", (f"{year}-%",))
+-    ozon_expenses = cur.fetchone()[0]
++    # 1–2. Выручка и себестоимость YTD, расходы Ozon — единая формула finance_core (с комиссией)
++    p = ozon_pnl(cur, *year_range(year))
++    revenue = p["income"]          # валовые доходы (цена + баллы + партнёры)
++    bonus = coinv = 0.0            # уже внутри revenue
++    cogs = p["cogs"]
++    ozon_expenses = p["ozon_total"]
++
++    # 3. Текущий запас (Inventory) — как в Балансе
++    inventory = inventory_value(cur)
++
++    # 4. Дебиторка — фактический баланс Ozon
++    receivables = calc_receivables(cur)
+ 
+     conn.close()
+ 
+@@ -106,6 +76,9 @@ def build(sh):
+     roi = (net_profit / total_capital * 100) if total_capital > 0 else 0
+     turnover = revenue / total_capital if total_capital > 0 else 0
+ 
++    _r = lambda v: round(float(v), 2)
++    revenue, cogs, inventory, receivables, cash, ap = map(_r, (revenue, cogs, inventory, receivables, cash, ap))
++    total_capital, net_profit, dio, dso, dpo, ccc, roi, turnover = map(_r, (total_capital, net_profit, dio, dso, dpo, ccc, roi, turnover))
+     return {
+         'revenue': revenue, 'cogs': cogs, 'inventory': inventory,
+         'receivables': receivables, 'cash': cash, 'ap': ap,
+@@ -148,7 +121,7 @@ def main():
+         ["CCC (DIO + DSO - DPO)", data['ccc'], "Чем меньше, тем лучше"],
+         ["", "", ""],
+         ["ЭФФЕКТИВНОСТЬ", "", ""],
+-        ["Прибыль (Выручка - COGS - Расходы Ozon)", data['net_profit'], "Упрощенный расчет"],
++        ["Валовая прибыль (Доходы − все расходы Ozon, вкл. комиссию − COGS)", data['net_profit'], "Сверено с P&L"],
+         ["ROI (Прибыль / Капитал)", f"{data['roi']:.2f}%", "Отдача на вложенный капитал"],
+         ["Оборачиваемость капитала", f"{data['turnover']:.2f}", "Выручка на 1 руб. капитала"]
+     ], range_name="A3")
+diff --git a/unitka/finance_core.py b/unitka/finance_core.py
+new file mode 100644
+index 0000000..c51c3b3
+--- /dev/null
++++ b/unitka/finance_core.py
+@@ -0,0 +1,234 @@
++"""unitka/finance_core.py — единый расчёт P&L по данным Ozon из БД.
++
++Зачем: до 2026-11-08 четыре модуля (calc_taxes, calc_dashboard,
++calc_working_capital, calc_plan_fact) считали «прибыль» как
++    доходы (валовые, ДО комиссии) − удержания (БЕЗ комиссии) − себестоимость
++и теряли комиссию Ozon (~780 тыс. ₽ за 2026). Здесь — одна проверенная
++формула, сверенная с кассой (выплаты Ozon + баланс) и с P&L.
++
++Правила (из брифа): модуль только читает БД, в Sheets не пишет.
++
++Использование:
++    from unitka.finance_core import ozon_pnl, tax_rate_pct
++    p = ozon_pnl(cur, "2026-01-01", "2027-01-01")
++    p["income"]          валовые доходы (цена + баллы + партнёры), как в ЛК Ozon
++    p["commission"]      вознаграждение Ozon (из accruals.sale_commission)
++    p["services"]        прочие удержания (логистика, реклама, эквайринг …)
++    p["ozon_total"]      всё, что оставил себе Ozon = income − net_from_ozon
++    p["net_from_ozon"]   что реально причитается продавцу (начислено − удержано)
++    p["cogs"]            себестоимость проданного С УЧЁТОМ возвратов
++    p["gross_profit"]    net_from_ozon − cogs  (= ВАЛОВАЯ ПРИБЫЛЬ в P&L)
++    p["margin_pct"]      gross_profit / income × 100
++    p["cogs_missing"]    True, если за период есть продажи, но себестоимость = 0
++    p["cogs_estimated"]  True, если часть себестоимости оценена по начислениям (месяц не закрыт)
++"""
++from __future__ import annotations
++
++import logging
++from datetime import date
++
++log = logging.getLogger(__name__)
++
++DEFAULT_TAX_RATE_PCT = 5.0  # УСН «доходы − расходы», ставка по умолчанию (НАСТРОЙКИ!B1 имеет приоритет)
++
++_COST_LATEST = """
++    SELECT sku, cost_price FROM product_cost_history
++    WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)
++"""
++
++
++def _one(cur, sql: str, params: tuple) -> float:
++    cur.execute(sql, params)
++    row = cur.fetchone()
++    return float(row[0] or 0.0) if row else 0.0
++
++
++def _month_bounds(date_from: str, date_to: str):
++    """Список месяцев 'YYYY-MM', целиком входящих в [date_from, date_to)."""
++    months = []
++    y, m = int(date_from[:4]), int(date_from[5:7])
++    while True:
++        start = f"{y:04d}-{m:02d}-01"
++        ny, nm = (y + 1, 1) if m == 12 else (y, m + 1)
++        end = f"{ny:04d}-{nm:02d}-01"
++        if start >= date_to:
++            break
++        if start >= date_from and end <= date_to:
++            months.append((start[:7], start, end))
++        y, m = ny, nm
++    return months
++
++
++def _income_commission(cur, date_from: str, date_to: str):
++    """Валовые доходы и комиссия Ozon: закрытые месяцы из monthly_reports, остальное из accruals."""
++    rng = (date_from, date_to)
++    income_acc_sql = """
++        SELECT COALESCE(SUM(COALESCE(sale_price,0) + COALESCE(bonus,0) + COALESCE(coinvestment,0)), 0)
++        FROM accruals WHERE date >= ? AND date < ?"""
++    comm_acc_sql = """
++        SELECT COALESCE(SUM(COALESCE(sale_commission,0)), 0)
++        FROM accruals WHERE date >= ? AND date < ?"""
++
++    income = _one(cur, income_acc_sql, rng)
++    commission = abs(_one(cur, comm_acc_sql, rng))
++
++    try:
++        cur.execute("SELECT month, sale_price_sum + bonus_sum + coinvestment_sum, gross_commission_sum FROM monthly_reports")
++        reports = {r[0]: (float(r[1] or 0), float(r[2] or 0)) for r in cur.fetchall()}
++    except Exception:
++        return income, commission
++
++    for month, start, end in _month_bounds(date_from, date_to):
++        if month not in reports:
++            continue
++        # заменяем месяц из accruals на месяц из отчёта о реализации
++        income -= _one(cur, income_acc_sql, (start, end))
++        commission -= abs(_one(cur, comm_acc_sql, (start, end)))
++        income += reports[month][0]
++        commission += abs(reports[month][1])
++    return income, commission
++
++
++def ozon_pnl(cur, date_from: str, date_to: str) -> dict:
++    """P&L по Ozon за [date_from, date_to). Даты — ISO 'YYYY-MM-DD'."""
++    rng = (date_from, date_to)
++
++    # Доходы и комиссия: для закрытых месяцев — из отчёта о реализации (monthly_reports,
++    # совпадает с ЛК и Точкой до копейки), для открытых — из начислений accruals.
++    # В accruals за янв/апр/авг доходы ниже отчёта о реализации на 37 236 ₽ (часть
++    # начислений не попала в выгрузку), поэтому отчёт о реализации — приоритетный источник.
++    income, commission = _income_commission(cur, date_from, date_to)
++
++    services = abs(_one(cur, """
++        SELECT COALESCE(SUM(amount), 0) FROM finance_transactions
++        WHERE type = 'deduction' AND date >= ? AND date < ?""", rng))
++
++    # Что реально причитается продавцу: начисления уже за вычетом комиссии, минус удержания.
++    net_from_ozon = _one(cur, """
++        SELECT COALESCE(SUM(amount), 0) FROM finance_transactions
++        WHERE date >= ? AND date < ?""", rng)
++
++    ozon_total = income - net_from_ozon  # комиссия + услуги + корректировки по возвратам
++
++    # Себестоимость с учётом возвратов: по месячным отчётам о реализации (закрытые месяцы),
++    # по дневной реализации — для месяцев, которых ещё нет в monthly_realization_rows.
++    m_from, m_to = date_from[:7], date_to[:7]
++    # В monthly_realization_rows quantity = кол-во доставленных (delivery_commission.quantity),
++    # возвраты лежат только в raw_json (return_commission.quantity); строка «только возврат»
++    # имеет quantity = 0. Поэтому нетто-штуки считаем как доставлено − возвращено из raw_json.
++    cogs_monthly = _one(cur, f"""
++        SELECT COALESCE(SUM(
++            (COALESCE(json_extract(m.raw_json, '$.delivery_commission.quantity'), m.quantity, 0)
++             - COALESCE(json_extract(m.raw_json, '$.return_commission.quantity'), 0)) * c.cost_price), 0)
++        FROM monthly_realization_rows m
++        LEFT JOIN ({_COST_LATEST}) c ON m.sku = c.sku
++        WHERE m.month >= ? AND m.month < ?""", (m_from, m_to))
++
++    cur.execute("SELECT DISTINCT month FROM monthly_realization_rows WHERE month >= ? AND month < ?", (m_from, m_to))
++    closed_months = {r[0] for r in cur.fetchall()}
++
++    # Открытые месяцы (ещё нет отчёта о реализации): realization_daily,
++    # а если и его нет — оценка по начислениям accruals (1 строка POSTING с ценой = 1 шт).
++    cogs_daily = 0.0
++    cogs_estimated = False
++    cur.execute("SELECT DISTINCT substr(date,1,7) FROM accruals WHERE date >= ? AND date < ?", rng)
++    for (month,) in cur.fetchall():
++        if month in closed_months:
++            continue
++        cur.execute("SELECT COUNT(*) FROM realization_daily WHERE substr(date,1,7) = ?", (month,))
++        if (cur.fetchone() or [0])[0] > 0:
++            cogs_daily += _one(cur, f"""
++                SELECT COALESCE(SUM(CASE WHEN r.is_return THEN -1 ELSE 1 END * r.quantity * c.cost_price), 0)
++                FROM realization_daily r
++                LEFT JOIN ({_COST_LATEST}) c ON r.sku = c.sku
++                WHERE substr(r.date,1,7) = ? AND r.date >= ? AND r.date < ?""", (month, date_from, date_to))
++        else:
++            cogs_estimated = True
++            cogs_daily += _one(cur, f"""
++                SELECT COALESCE(SUM(c.cost_price), 0)
++                FROM accruals a LEFT JOIN ({_COST_LATEST}) c ON a.sku = c.sku
++                WHERE a.accrued_category = 'POSTING' AND a.sale_price > 0
++                  AND substr(a.date,1,7) = ? AND a.date >= ? AND a.date < ?""", (month, date_from, date_to))
++
++    cogs = cogs_monthly + cogs_daily
++    gross_profit = net_from_ozon - cogs
++    margin_pct = (gross_profit / income * 100.0) if income > 0 else 0.0
++
++    return {
++        "date_from": date_from, "date_to": date_to,
++        "income": income,
++        "commission": commission,
++        "services": services,
++        "ozon_total": ozon_total,
++        "net_from_ozon": net_from_ozon,
++        "cogs": cogs,
++        "gross_profit": gross_profit,
++        "margin_pct": margin_pct,
++        "cogs_missing": income > 0 and cogs <= 0,
++        "cogs_estimated": cogs_estimated,
++    }
++
++
++def year_range(year: int) -> tuple[str, str]:
++    return f"{year}-01-01", f"{year + 1}-01-01"
++
++
++def month_range(year: int, month: int) -> tuple[str, str]:
++    ny, nm = (year + 1, 1) if month == 12 else (year, month + 1)
++    return f"{year}-{month:02d}-01", f"{ny}-{nm:02d}-01"
++
++
++def receivables(cur) -> float:
++    """Дебиторка Ozon. Приоритет — фактический баланс из balance_periods
++    (цифра самого Ozon), иначе — расчёт начислено − выплачено."""
++    try:
++        cur.execute("SELECT end_balance FROM balance_periods WHERE end_balance IS NOT NULL ORDER BY period_end DESC LIMIT 1")
++        row = cur.fetchone()
++        if row and row[0] is not None:
++            return float(row[0])
++    except Exception as exc:  # noqa: BLE001
++        log.debug("balance_periods недоступна: %s", exc)
++    acc = _one(cur, "SELECT COALESCE(SUM(amount), 0) FROM finance_transactions", ())
++    pay = _one(cur, "SELECT COALESCE(SUM(amount), 0) FROM finance_payouts", ())
++    return acc - pay
++
++
++def inventory_value(cur) -> float:
++    """Остатки × последняя себестоимость — одна формула для Баланса, Пульта и Оборотного капитала."""
++    cur.execute("SELECT MAX(date) FROM stock_daily")
++    row = cur.fetchone()
++    if not row or not row[0]:
++        return 0.0
++    return _one(cur, f"""
++        SELECT COALESCE(SUM((s.fbo_present + s.fbs_present) * c.cost_price), 0)
++        FROM stock_daily s LEFT JOIN ({_COST_LATEST}) c ON s.sku = c.sku
++        WHERE s.date = ? AND (s.fbo_present + s.fbs_present) > 0""", (row[0],))
++
++
++def tax_rate_pct(sh=None) -> float:
++    """Ставка налога, %: НАСТРОЙКИ!B1 → иначе DEFAULT_TAX_RATE_PCT."""
++    if sh is None:
++        return DEFAULT_TAX_RATE_PCT
++    try:
++        ws = sh.worksheet("НАСТРОЙКИ")
++        raw = (ws.acell("B1").value or "").replace("%", "").replace(",", ".").strip()
++        val = float(raw)
++        if 0 < val < 100:
++            return val
++    except Exception as exc:  # noqa: BLE001
++        log.warning("НАСТРОЙКИ!B1 не прочитана (%s) — ставка %.1f%%", exc, DEFAULT_TAX_RATE_PCT)
++    return DEFAULT_TAX_RATE_PCT
++
++
++if __name__ == "__main__":
++    import sys
++    from .db import connect
++
++    year = int(sys.argv[1]) if len(sys.argv) > 1 else date.today().year
++    conn = connect()
++    cur = conn.cursor()
++    p = ozon_pnl(cur, *year_range(year))
++    for k, v in p.items():
++        print(f"{k:16} {v:>16,.2f}" if isinstance(v, float) else f"{k:16} {v}")
++    print(f"{'receivables':16} {receivables(cur):>16,.2f}")
++    print(f"{'inventory':16} {inventory_value(cur):>16,.2f}")
+diff --git a/unitka/load_sales_xlsx.py b/unitka/load_sales_xlsx.py
+index c01b8ae..4d5928b 100644
+--- a/unitka/load_sales_xlsx.py
++++ b/unitka/load_sales_xlsx.py
+@@ -15,7 +15,7 @@ DOWNLOADS = APP_DIR / "downloads"
+ 
+ COLUMN_KEYS = {
+     "sku": ["sku"],
+-    "offer_id": ["артикул продавца"],
++    "offer_id": ["артикул продавца", "артикул"],
+     "name": ["товары"],
+     "date": ["день"],
+     "impressions": ["показы всего"],
+@@ -107,11 +107,15 @@ def _build_headers(df, max_header_rows=20):
+     if data_start is None:
+         data_start = sku_row + 2
+ 
+-    # Собираем ВСЕ заголовки каждой колонки через пробел
++    # Собираем заголовки каждой колонки через пробел.
++    # Берём ТОЛЬКО строки с названиями (группа + название колонки), без строки-описания:
++    # описание «Показы всего» содержит слова «посещения карточки», из-за чего
++    # views раньше находились в колонке показов (impressions == views во всех строках).
++    header_rows_end = min(sku_row + 2, data_start)
+     headers = []
+     for j in range(df.shape[1]):
+         parts = []
+-        for i in range(data_start):
++        for i in range(header_rows_end):
+             v = df.iloc[i, j]
+             if v is not None and not (isinstance(v, float) and pd.isna(v)):
+                 s = str(v).strip()
+@@ -122,6 +126,37 @@ def _build_headers(df, max_header_rows=20):
+ 
+     return headers, data_start, sku_col
+ 
++def ensure_table(conn):
++    """Создаёт analytics_manual, если её ещё нет, и уникальный индекс для идемпотентности."""
++    conn.execute("""
++        CREATE TABLE IF NOT EXISTS analytics_manual (
++            date TEXT NOT NULL,
++            sku TEXT NOT NULL,
++            offer_id TEXT, name TEXT,
++            impressions INTEGER DEFAULT 0, views INTEGER DEFAULT 0,
++            cart INTEGER DEFAULT 0, orders INTEGER DEFAULT 0,
++            buyouts INTEGER DEFAULT 0,
++            position REAL, drr REAL, avg_price REAL, price_index REAL,
++            discount_pct REAL, reviews_count INTEGER, rating REAL,
++            source_file TEXT, loaded_at TEXT
++        )
++    """)
++    # Уникальность (date, sku): повторная загрузка того же отчёта не создаёт дублей.
++    # Сначала убираем возможные дубли от прошлых загрузок без индекса.
++    conn.execute("""
++        DELETE FROM analytics_manual WHERE rowid NOT IN (
++            SELECT rowid FROM analytics_manual am2
++            WHERE am2.rowid = (
++                SELECT rowid FROM analytics_manual a
++                WHERE a.date = analytics_manual.date AND a.sku = analytics_manual.sku
++                ORDER BY a.loaded_at DESC, a.rowid DESC LIMIT 1))
++    """)
++    try:
++        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_am_date_sku ON analytics_manual(date, sku)")
++    except Exception as e:
++        logger.warning("Уникальный индекс не создан (останутся дубли): %s", e)
++    conn.commit()
++
+ def load_file(path, date_str=None):
+     if date_str is None:
+         date_str = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
+@@ -148,6 +183,7 @@ def load_file(path, date_str=None):
+         return 0
+ 
+     conn = connect()
++    ensure_table(conn)
+     cur = conn.cursor()
+     saved = 0
+     skipped = 0
