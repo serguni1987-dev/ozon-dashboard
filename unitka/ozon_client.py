@@ -46,6 +46,11 @@ class OzonClient:
     def accrual_by_day(self, date: str, last_id: str = "") -> dict:
         return self._post("/v1/finance/accrual/by-day", {"date": date, "last_id": last_id})
 
+
+    def update_prices(self, prices_list: list) -> dict:
+        """Обновляет цены. Формат: [{"offer_id": "X", "price": "1000", "min_price_for_auto_actions_enabled": False}]"""
+        payload = {"prices": prices_list}
+        return self._post("/v1/product/import/prices", payload)
     def accrual_by_day_all(self, date: str) -> list:
         out, last_id = [], ""
         while True:
