@@ -14,6 +14,14 @@ from gspread_formatting import (
 )
 
 SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
+
+# ID таблицы — из unitka.config (app\.env → PULT_SHEET_ID); строка выше остаётся запасным значением.
+try:
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from unitka.config import SHEET_ID  # noqa: E402
+except Exception:  # noqa: BLE001
+    pass
 CREDENTIALS = "credentials.json"
 DB = "ozon.db"
 
@@ -663,10 +671,10 @@ def build_manual(con):
         ["Восстановить базу", "copy backups/ozon_<дата>.db ozon.db", ""],
         ["", "", ""],
         ["⚙️ ТЕХНИЧЕСКИЕ ДЕТАЛИ", "", ""],
-        ["Папка проекта", "C:/Users/sergu/Desktop/проект/", ""],
+        ["Папка проекта", os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ""],
         ["Главный скрипт", "run.py — утренний ритуал (11 шагов)", ""],
         ["База данных", "ozon.db — вся история продаж, цен, остатков", ""],
-        ["Google Sheet ID", "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0", ""],
+        ["Google Sheet ID", SHEET_ID, ""],
         ["Service Account", "ozon-bot@ozon-dashboard-509209.iam.gserviceaccount.com", ""],
         ["Ставки Ozon", "Комиссия 2,81%, Услуги 14,2%, Premium 4 990 ₽/мес", ""],
         ["Резервные копии", "backups/ — 30 последних копий ozon.db", ""],

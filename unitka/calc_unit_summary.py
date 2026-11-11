@@ -7,7 +7,7 @@ from .db import connect
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRED = os.path.join(APP_DIR, "app", "credentials.json")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
+from .config import SHEET_ID  # ID таблицы: app\.env → PULT_SHEET_ID
 
 
 def _periods():

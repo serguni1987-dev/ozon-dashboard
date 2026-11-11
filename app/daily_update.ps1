@@ -101,8 +101,8 @@ Write-Host "VPN работает, продолжаем." -ForegroundColor Green
 Write-Host "[0/14] Загрузка начислений, отправлений, цен и остатков из Ozon..." -ForegroundColor Yellow
 $FromDate = (Get-Date).AddDays(-7).ToString("yyyy-MM-dd")
 $ToDate = Get-Date -Format "yyyy-MM-dd"
-python -m unitka.load_realization_daily --from $FromDate --to $ToDate --force
-python -m unitka.load_postings --from $FromDate --to $ToDate
+py -m unitka.load_realization_daily --from $FromDate --to $ToDate --force
+py -m unitka.load_postings --from $FromDate --to $ToDate
 # Текущие цены и остатки нужны для «МИН. ЦЕНЫ» (Юнит-сводка, Юнит экономика, ПУЛЬТ).
 Set-Location (Join-Path $ProjectRoot "app")
 if (-not (Invoke-CmdRetry "py" @("fetch_current_prices.py") -MaxAttempts 1)) {
@@ -119,7 +119,7 @@ Set-Location (Join-Path $ProjectRoot "app")
 $step1ok = $true
 if (-not (Invoke-CmdRetry "py" @("sync_finance.py")))          { $step1ok = $false }
 if (-not (Invoke-CmdRetry "py" @("sync_monthly.py")))          { $step1ok = $false }
-if (-not (Invoke-CmdRetry "py" @("PNL\sync_pnl.py", "2026")))  { $step1ok = $false }
+if (-not (Invoke-CmdRetry "py" @("PNL\sync_pnl.py", "$((Get-Date).Year)")))  { $step1ok = $false }
 if (-not (Invoke-CmdRetry "py" @("PNL\pnl_format.py")))        { $step1ok = $false }
 if (-not (Invoke-CmdRetry "py" @("PNL\fix_sheet_full.py")))    { $step1ok = $false }
 if (-not $step1ok) {
@@ -136,19 +136,19 @@ if (-not (Invoke-PyRetry "unitka.run_finance" @("--days","7"))) {
 
 # === 3. КОНТЕНТ-РЕЙТИНГИ ===
 Write-Host "[3/14] Загрузка контент-рейтингов..." -ForegroundColor Yellow
-python -m unitka.load_ratings
+py -m unitka.load_ratings
 
 # === 4. СЕЗОННОСТЬ ===
 Write-Host "[4/14] Анализ сезонности..." -ForegroundColor Yellow
-python -m unitka.calc_seasonality
+py -m unitka.calc_seasonality
 
 # === 5. ПРОГНОЗ ===
 Write-Host "[5/14] Прогноз продаж..." -ForegroundColor Yellow
-python -m unitka.calc_forecast
+py -m unitka.calc_forecast
 
 # === 6. РЕКОМЕНДАЦИИ ПО ЗАКУПКАМ ===
 Write-Host "[6/14] Рекомендации по закупкам..." -ForegroundColor Yellow
-python -m unitka.calc_recommendations
+py -m unitka.calc_recommendations
 
 # === 7. АНАЛИТИКА + ПУЛЬТ ===
 Write-Host "[7/14] Аналитический пайплайн (воронка, ПУЛЬТ)..." -ForegroundColor Yellow
@@ -164,7 +164,7 @@ if (-not (Invoke-PyRetry "unitka.calc_change_log")) {
 
 # === 9. ЗАГРУЗКА ВОЗВРАТОВ ===
 Write-Host "[9/14] Загрузка возвратов..." -ForegroundColor Yellow
-python -m unitka.load_returns
+py -m unitka.load_returns
 
 # === 10. АНАЛИЗ ВОЗВРАТОВ ===
 Write-Host "[10/14] Анализ возвратов..." -ForegroundColor Yellow
@@ -186,13 +186,13 @@ if (-not (Invoke-PyRetry "unitka.calc_strategy")) {
 
 # === 13. БЭКАП БД ===
 Write-Host "[13/14] Бэкап БД..." -ForegroundColor Yellow
-python -m unitka.backup_db
+py -m unitka.backup_db
 
 # === 14. ФИНАЛЬНЫЙ ПУЛЬТ ===
 
 # === ГЕНЕРАЦИЯ УМНОГО ПЛАНА ДЕЙСТВИЙ ===
 Write-Host "[New] Генерация умного плана действий..." -ForegroundColor Yellow
-python -m unitka.calc_action_plan
+py -m unitka.calc_action_plan
 Write-Host "[14/14] Финальное обновление ПУЛЬТА..." -ForegroundColor Yellow
 if (-not (Invoke-PyRetry "unitka.calc_pulse")) {
     Write-Host "  unitka.calc_pulse пропущен после повторов." -ForegroundColor Red

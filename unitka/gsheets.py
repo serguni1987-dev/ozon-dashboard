@@ -25,7 +25,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
-DEFAULT_SPREADSHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
+from .config import SHEET_ID as DEFAULT_SPREADSHEET_ID  # app\.env → PULT_SHEET_ID
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _client: gspread.Client | None = None
 

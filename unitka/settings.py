@@ -231,6 +231,31 @@ def unit_params(sh=None, grid: list | None = None) -> dict:
     return out
 
 
+def rule_params(sh=None, grid: list | None = None) -> dict:
+    """Пороги правил «Плана действий» (unitka/rules.py) с листа «НАСТРОЙКИ».
+    Ищутся по подписи в колонке A; если строки нет — ключ не возвращается и
+    rules.py берёт значение по умолчанию.
+        «Неликвид: дней без продаж»   → dead_stock_days
+        «Убыточная маржа, %»          → negative_margin_pct (например −5)
+        «Нет в наличии: дней простоя» → oos_lost_days
+    """
+    out: dict = {}
+    if sh is None and grid is None:
+        return out
+    grid = read_grid(sh) if grid is None else grid
+    params = _params(grid)
+    val = to_float(_param(params, "неликвид"))
+    if val is not None and 1 <= val <= 730:
+        out["dead_stock_days"] = int(val)
+    val = to_float(_param(params, "убыточная маржа"))
+    if val is not None and -100 < val <= 0:
+        out["negative_margin_pct"] = val
+    val = to_float(_param(params, "нет в наличии"))
+    if val is not None and 1 <= val <= 90:
+        out["oos_lost_days"] = int(val)
+    return out
+
+
 def plan_rows(sh, grid: list | None = None):
     """Блок «ПЛАН ПО МЕСЯЦАМ» как таблица строк (заголовок + данные) в формате старого
     листа «План»: месяц 'YYYY-MM', числа — строками. Блока нет → None (читать «План»)."""

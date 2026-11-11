@@ -6,13 +6,16 @@ echo   ????? OZON - ??????
 echo ============================================================
 echo.
 
-"C:\Users\sergu\AppData\Local\Python\pythoncore-3.14-64\python.exe" run.py
+py run.py
 
 echo.
 echo ============================================================
 echo   ???????? Google Sheets...
 echo ============================================================
-start "" "https://docs.google.com/spreadsheets/d/1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0/edit"
+pushd "%~dp0"
+for /f "delims=" %%i in ('py -c "from unitka import config; print(config.SHEET_ID)"') do set SHEET_ID=%%i
+popd
+start "" "https://docs.google.com/spreadsheets/d/%SHEET_ID%/edit"
 
 echo.
 echo === ?????? ===

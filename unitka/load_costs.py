@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from unitka import config
 
-CSV_PATH = Path(r"C:\Users\sergu\Desktop\проект\costs_all.csv")
+CSV_PATH = config.COSTS_CSV  # проект\costs_all.csv; переопределяется PULT_COSTS_CSV
 
 
 def load_costs():

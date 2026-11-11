@@ -17,6 +17,27 @@ class Task:
     money_impact: float # Эффект в рублях (потеря или выгода)
 
 
+# Пороги правил. Значения по умолчанию; calc_action_plan подставляет значения с листа
+# «НАСТРОЙКИ» (settings.rule_params), если там есть строки с такими подписями.
+THRESHOLDS = {
+    "dead_stock_days": 60,        # «Неликвид: дней без продаж»
+    "negative_margin_pct": -5.0,  # «Убыточная маржа, %» (ниже этого значения — задача)
+    "oos_lost_days": 7,           # за сколько дней простоя считать упущенную выручку
+}
+
+
+def _rub(v: float) -> str:
+    """12825.4 → «12 825» (разряды через пробел, как принято в русских отчётах)."""
+    return f"{v:,.0f}".replace(",", " ")
+
+
+def set_thresholds(values: dict | None) -> None:
+    """Обновляет пороги (только известные ключи с числовым значением)."""
+    for key, val in (values or {}).items():
+        if key in THRESHOLDS and isinstance(val, (int, float)):
+            THRESHOLDS[key] = val
+
+
 # Словарь с правилами. Функция принимает "паспорт" товара (dict) и возвращает Task или None.
 # В будущем сюда легко добавить новые правила, не меняя сам calc_pulse.py.
 
@@ -34,8 +55,8 @@ def check_price_below_min(sku_data: dict) -> Optional[Task]:
             severity=1,
             sku=sku_data["sku"],
             offer_id=sku_data.get("offer_id", ""),
-            problem=f"Цена {price:,.0f} ₽ ниже минимальной {min_price:,.0f} ₽",
-            action=f"Поднять цену до {min_price:,.0f} ₽",
+            problem=f"Цена {_rub(price)} ₽ ниже минимальной {_rub(min_price)} ₽",
+            action=f"Поднять цену до {_rub(min_price)} ₽",
             money_impact=total_loss
         )
     return None
@@ -48,8 +69,8 @@ def check_out_of_stock(sku_data: dict) -> Optional[Task]:
     avg_price = sku_data.get("avg_price", 0)
     
     if stock == 0 and sold_14d > 0:
-        # Примерная упущенная выручка: продажи за 14 дней / 14 * 7 дней простоя * цену
-        lost_revenue = (sold_14d / 14) * 7 * avg_price
+        # Примерная упущенная выручка: продажи за 14 дней / 14 * N дней простоя * цену
+        lost_revenue = (sold_14d / 14) * THRESHOLDS["oos_lost_days"] * avg_price
         return Task(
             rule_id="out_of_stock",
             severity=1,
@@ -62,8 +83,10 @@ def check_out_of_stock(sku_data: dict) -> Optional[Task]:
     return None
 
 
-def check_dead_stock(sku_data: dict, threshold_days: int = 60) -> Optional[Task]:
+def check_dead_stock(sku_data: dict, threshold_days: Optional[int] = None) -> Optional[Task]:
     """Неликвид (лежит на складе без продаж больше N дней)."""
+    if threshold_days is None:
+        threshold_days = THRESHOLDS["dead_stock_days"]
     stock = sku_data.get("stock", 0)
     days_no_sales = sku_data.get("days_no_sales", 0)
     cost_price = sku_data.get("cost", 0)
@@ -87,15 +110,24 @@ def check_negative_margin(sku_data: dict) -> Optional[Task]:
     margin_pct = sku_data.get("margin_pct", 0)
     revenue_30d = sku_data.get("revenue_30d", 0)
     
-    if margin_pct < -5 and revenue_30d > 0:  # -5% чтобы отсечь случайные колебания
+    if margin_pct < THRESHOLDS["negative_margin_pct"] and revenue_30d > 0:  # порог отсекает случайные колебания
         loss = abs(revenue_30d * (margin_pct / 100))
+        price = sku_data.get("price", 0)
+        min_price = sku_data.get("min_price", 0)
+        if min_price > 0 and 0 < price < min_price:
+            action = f"Поднять цену до {_rub(min_price)} ₽ (сейчас {_rub(price)} ₽)"
+        elif min_price > 0 and price >= min_price:
+            action = (f"Цена {_rub(price)} ₽ уже выше минимальной {_rub(min_price)} ₽ — "
+                      "проверить акции и возвраты за 30 дней")
+        else:
+            action = "Поднять цену или отключить товар"
         return Task(
             rule_id="negative_margin",
             severity=1,
             sku=sku_data["sku"],
             offer_id=sku_data.get("offer_id", ""),
-            problem=f"Маржинальность {margin_pct:.1f}% (убыток {loss:,.0f} ₽ за 30 дней)",
-            action="Поднять цену или отключить товар",
+            problem=f"Маржинальность {margin_pct:.1f}% (убыток {_rub(loss)} ₽ за 30 дней)",
+            action=action,
             money_impact=loss
         )
     return None

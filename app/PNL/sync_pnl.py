@@ -46,8 +46,15 @@ def parse_regime(raw):
         return REGIME_INCOME
     return REGIME_DR
 
-_sync = open(os.path.join(APP_DIR, "sheets_sync.py"), encoding="utf-8").read()
-SHEET_ID = re.search(r'SHEET_ID\s*=\s*"([^"]+)"', _sync).group(1)
+# ID таблицы — из unitka.config (app\.env → PULT_SHEET_ID). Если unitka недоступна — как раньше, из sheets_sync.py.
+try:
+    _project = os.path.dirname(APP_DIR)
+    if _project not in sys.path:
+        sys.path.insert(0, _project)
+    from unitka.config import SHEET_ID
+except Exception:  # noqa: BLE001
+    _sync = open(os.path.join(APP_DIR, "sheets_sync.py"), encoding="utf-8").read()
+    SHEET_ID = re.search(r'SHEET_ID\s*=\s*"([^"]+)"', _sync).group(1)
 
 
 CATEGORY_MAP = {

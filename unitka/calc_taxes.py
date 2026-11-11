@@ -8,7 +8,7 @@ from .finance_core import ozon_pnl, year_range, tax_settings, DEFAULT_TAX_RATE_P
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRED = os.path.join(APP_DIR, "app", "credentials.json")
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
+from .config import SHEET_ID  # ID таблицы: app\.env → PULT_SHEET_ID
 
 # Константы для 2026 года
 FIXED_IP_CONTRIB = DEFAULT_CONTRIB  # взносы ИП по умолчанию; фактическое значение — НАСТРОЙКИ!B5

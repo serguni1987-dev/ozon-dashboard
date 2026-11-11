@@ -1,7 +1,9 @@
 ﻿# install_task.ps1 v3
 $TaskName = "OzonMonthlyRitual"
-$AppDir   = "C:\Users\sergu\Desktop\проект\app"
-$PythonExe = "C:\Users\sergu\AppData\Local\Python\pythoncore-3.14-64\python.exe"
+# Пути больше не зашиты: папка app — там, где лежит этот файл; Python — тот, что находит лаунчер py.
+$AppDir   = $PSScriptRoot
+$PythonExe = (& py -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1)
+if (-not $PythonExe) { Write-Error "Python не найден (команда py). Установите Python 3.11+ с python.org."; exit 1 }
 
 if (-not (Test-Path $PythonExe)) {
     Write-Error "Python не найден: $PythonExe"

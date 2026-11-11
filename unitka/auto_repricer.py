@@ -7,6 +7,7 @@ from google.oauth2.service_account import Credentials
 from .db import connect
 from .ozon_client import OzonClient
 from . import unit_core, settings, config
+from .finance_core import tax_settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -62,10 +63,14 @@ def main():
     creds = Credentials.from_service_account_file(str(config.CREDENTIALS), scopes=SCOPES)
     sh = gspread.authorize(creds).open_by_key(config.SHEET_ID)
     
-    tax = {"rate_pct": 5.0, "regime": "income_minus_expense"}
+    # Налог — из листа «НАСТРОЙКИ», как в «Юнит-сводке». Раньше здесь стоял режим
+    # "income_minus_expense": unit_core его не узнавал и вместо минимального налога 1 %
+    # закладывал все 5 % — мин. цена получалась на 7–10 % выше, чем в «Юнит-сводке».
+    tax = tax_settings(sh)
     unit = settings.unit_params(sh)
-    
-    eco = unit_core.sku_economics(cur, "2026-01-01", "2027-01-01")
+
+    year = datetime.now().year
+    eco = unit_core.sku_economics(cur, f"{year}-01-01", f"{year + 1}-01-01")
     true_floors = unit_core.min_prices(cur, eco, tax, unit)
 
     # 2. Получаем offer_id для всех SKU из sku_map

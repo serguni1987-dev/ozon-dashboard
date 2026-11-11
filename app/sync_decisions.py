@@ -9,6 +9,14 @@ from datetime import datetime, timedelta
 from google.oauth2.service_account import Credentials
 
 SHEET_ID = "1Or2Gak6ihm00rM7ZNF4YvGcEPi6ULLadKIgBjnQZ6q0"
+
+# ID таблицы — из unitka.config (app\.env → PULT_SHEET_ID); строка выше остаётся запасным значением.
+try:
+    import os as _os, sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
+    from unitka.config import SHEET_ID  # noqa: E402
+except Exception:  # noqa: BLE001
+    pass
 CREDENTIALS = "credentials.json"
 DB = "ozon.db"
 
