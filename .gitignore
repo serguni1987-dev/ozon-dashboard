@@ -82,3 +82,4 @@ unitka/_patches/
 app/_accrual_types.json
 app/_*.py
 _archive/
+models/
