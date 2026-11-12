@@ -116,7 +116,8 @@ def main():
             continue
 
         logger.info(f"  Меняем {t['offer_id']}: {t['old']:,.0f} -> {t['new']:,.0f}")
-        payload = [{"offer_id": t["offer_id"], "price": str(t["new"])}]
+        old_price = str(round(t["new"] * 1.2, 2)) # Зачеркнутая цена на 20% выше
+        payload = [{"offer_id": t["offer_id"], "price": str(t["new"]), "old_price": old_price}]
         
         try:
             res = client.update_prices(payload)
