@@ -198,6 +198,11 @@ if (-not (Invoke-PyRetry "unitka.calc_pulse")) {
     Write-Host "  unitka.calc_pulse пропущен после повторов." -ForegroundColor Red
 }
 
+
+# === АВТОМАТИЧЕСКИЙ РЕПРАЙСИНГ (ПЛАВНЫЙ ШАГ) ===
+Write-Host "[New] Запуск динамического репрайсинга..." -ForegroundColor Yellow
+python -m unitka.update_min_prices
+python -m unitka.auto_repricer --limit 15
 Write-Host "=== ГОТОВО: $(Get-Date) ===" -ForegroundColor Green
 
 
