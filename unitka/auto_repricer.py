@@ -1,6 +1,4 @@
-﻿"""unitka/auto_repricer.py — динамическое изменение цены по индексу и конкурентам.
-Запуск: py -m unitka.auto_repricer [--dry-run] [--limit N]
-"""
+﻿"""unitka/auto_repricer.py — динамическое изменение цены по индексу и конкурентам."""
 import argparse
 import logging
 from datetime import datetime, timedelta
@@ -13,17 +11,16 @@ from . import unit_core, settings, config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
 
+
 def can_update(conn, offer_id):
     one_hour_ago = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
     cur = conn.execute("SELECT COUNT(*) FROM price_update_log WHERE offer_id = ? AND updated_at > ?", (offer_id, one_hour_ago))
     return cur.fetchone()[0] < 10
 
-def get_market_data(client, offer_ids):
-    """Получает реальные цены, индексы и цены конкурентов (постранично)."""
+
+def get_real_prices(client, offer_ids):
+    """Получает реальные цены через API v5 (постранично)."""
     real_prices = {}
-    index_data = {}
-    
-    # 1. Цены из v5 (постранично по 1000)
     for i in range(0, len(offer_ids), 1000):
         chunk = offer_ids[i:i+1000]
         payload = {"filter": {"offer_id": chunk}, "limit": len(chunk), "cursor": ""}
@@ -34,21 +31,14 @@ def get_market_data(client, offer_ids):
                 p = float(item.get("price", {}).get("price", 0) or 0)
                 real_prices[oid] = p
         except Exception as e:
-            logger.error(f"Ошибка v5: {e}")
-            
-    # 2. Индексы и конкуренты из v3 (по 100 SKU за раз)
-    for i in range(0, len(offer_ids), 100):
-        chunk = offer_ids[i:i+100]
-        # В v3 передаются product_id или sku, но если у нас есть только offer_id, 
-        # нужен маппинг. Для простоты пока используем /v3/product/info/list через sku.
-        pass # Для безопасности пока не будем перегружать API
-        
-    return real_prices, index_data
+            logger.error(f"Ошибка запроса цен v5: {e}")
+    return real_prices
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--dry-run", action="store_true", help="Только показать план")
+    parser.add_argument("--limit", type=int, default=0, help="Сколько товаров обновить (0 = все)")
     args = parser.parse_args()
 
     conn = connect()
@@ -60,6 +50,7 @@ def main():
     SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_file(str(config.CREDENTIALS), scopes=SCOPES)
     sh = gspread.authorize(creds).open_by_key(config.SHEET_ID)
+    
     tax = {"rate_pct": 5.0, "regime": "income_minus_expense"}
     unit = settings.unit_params(sh)
     
@@ -72,8 +63,8 @@ def main():
     offer_ids = list(sku_to_offer.values())
     client = OzonClient()
     
-    logger.info("Получаем реальные цены...")
-    real_prices, index_data = get_market_data(client, offer_ids)
+    logger.info("Получаем реальные цены из Ozon...")
+    real_prices = get_real_prices(client, offer_ids)
 
     tasks = []
     for sku_int, f_data in true_floors.items():
@@ -87,29 +78,41 @@ def main():
         if min_price == 0: continue
 
         # ЛОГИКА ЦЕНООБРАЗОВАНИЯ:
-        # 1. Если мы продаем в убыток (ниже пола) -> срочно поднимаем до пола + 2%
+        # Если мы продаем в убыток (ниже пола) -> поднимаем, но не более чем на 15% за раз
         if current_price < min_price:
-            new_price = round(min_price * 1.02, 2)
-            tasks.append({"offer_id": offer_id, "old": current_price, "new": new_price, "reason": "Выход из убытка"})
-            continue
+            target_price = round(min_price * 1.02, 2)       # Идеальная цена (пол + 2%)
+            max_step_price = round(current_price * 1.15, 2) # Максимум +15% за раз
+            
+            if target_price > max_step_price:
+                new_price = max_step_price
+                reason = "Выход из убытка (плавный шаг +15%)"
+            else:
+                new_price = target_price
+                reason = "Выход из убытка"
+                
+            tasks.append({"offer_id": offer_id, "old": current_price, "new": new_price, "reason": reason})
 
-        # 2. Если мы в плюсе, но дороже конкурентов (нужно добавить логику индексов)
-        # (Оставим на следующий шаг, когда проверим работу API)
-        
     logger.info(f"Найдено задач: {len(tasks)}")
-    if not tasks: return
+    if not tasks: 
+        conn.close()
+        return
 
-    tasks.sort(key=lambda x: x["old"], reverse=False) # Сначала самые дешевые (убыточные)
-    if args.limit > 0: tasks = tasks[:args.limit]
+    # Сортируем по размеру убытка (сначала самые дешевые/убыточные)
+    tasks.sort(key=lambda x: x["old"], reverse=False) 
+    if args.limit > 0: 
+        tasks = tasks[:args.limit]
 
     if args.dry_run:
         for t in tasks:
             logger.info(f"  {t['offer_id']}: {t['old']:,.0f} -> {t['new']:,.0f} ({t['reason']})")
+        conn.close()
         return
 
+    # Отправка в API
+    success = 0
     for t in tasks:
         if not can_update(conn, t["offer_id"]):
-            logger.warning(f"  [{t['offer_id']}] Лимит 10 раз в час")
+            logger.warning(f"  [{t['offer_id']}] Лимит 10 раз в час. Пропускаем.")
             continue
 
         logger.info(f"  Меняем {t['offer_id']}: {t['old']:,.0f} -> {t['new']:,.0f}")
@@ -118,15 +121,18 @@ def main():
         try:
             res = client.update_prices(payload)
             result_list = res.get("result", [])
+            # Проверяем ответ Ozon!
             if result_list and result_list[0].get("updated") is True:
                 conn.execute("INSERT INTO price_update_log VALUES (?, ?, ?, ?)", 
                              (t["offer_id"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), t["old"], t["new"]))
                 conn.commit()
+                success += 1
             else:
-                logger.error(f"  Отклонено Ozon: {result_list[0].get('errors')}")
+                logger.error(f"  Отклонено Ozon: {result_list[0].get('errors') if result_list else 'Пустой ответ'}")
         except Exception as e:
             logger.error(f"  Ошибка API: {e}")
 
+    logger.info(f"Успешно обновлено: {success} из {len(tasks)}")
     conn.close()
 
 if __name__ == "__main__":
