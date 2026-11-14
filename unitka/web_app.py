@@ -1,12 +1,9 @@
 import datetime
 import os
 import re
-import sqlite3
 import subprocess
 import sys
-import time
 import uuid
-from contextlib import closing
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,12 +13,9 @@ import pandas as pd
 import streamlit as st
 from google.oauth2.service_account import Credentials
 from unitka import config
+from unitka.ai_sql_safety import get_schema, read_query
 
 st.set_page_config(page_title="Пульт Ozon AI", layout="wide")
-TABLES = {"abc_xyz", "monthly_reports", "realization_daily"}
-FUNCTIONS = {"sum", "count", "avg", "min", "max", "round", "abs", "coalesce",
-             "ifnull", "nullif", "date", "datetime", "strftime", "substr",
-             "substring", "lower", "upper", "trim", "replace", "length"}
 MODEL = config.AI_MODEL
 
 
@@ -29,11 +23,6 @@ def revision():
     paths = [Path(config.DB_PATH), Path(str(config.DB_PATH) + "-wal")]
     return tuple((str(p), p.stat().st_mtime_ns, p.stat().st_size)
                  if p.exists() else (str(p), 0, 0) for p in paths)
-
-
-def open_readonly():
-    uri = Path(config.DB_PATH).resolve().as_uri() + "?mode=ro"
-    return sqlite3.connect(uri, uri=True, timeout=10)
 
 
 @st.cache_data(ttl=300, max_entries=4)
@@ -58,42 +47,13 @@ def load_action_plan(sheet_id, credentials_path):
 
 @st.cache_data(ttl=60, max_entries=8)
 def get_db_schema(db_revision):
-    lines = []
-    with closing(open_readonly()) as conn:
-        for table in sorted(TABLES):
-            columns = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
-            if columns:
-                lines.append(table + " (" + ", ".join(
-                    f"{c[1]} {c[2]}" for c in columns) + ")")
-    return "\n".join(lines)
-
-
-def authorize(action, arg1, arg2, database, origin):
-    if action in (sqlite3.SQLITE_SELECT, sqlite3.SQLITE_RECURSIVE):
-        return sqlite3.SQLITE_OK
-    if action == sqlite3.SQLITE_READ:
-        return (sqlite3.SQLITE_OK if database == "main" and arg1 in TABLES
-                else sqlite3.SQLITE_DENY)
-    if action == sqlite3.SQLITE_FUNCTION:
-        return (sqlite3.SQLITE_OK if (arg2 or arg1 or "").lower() in FUNCTIONS
-                else sqlite3.SQLITE_DENY)
-    return sqlite3.SQLITE_DENY
+    return get_schema(config.DB_PATH)
 
 
 @st.cache_data(ttl=60, max_entries=100, show_spinner=False)
 def execute_sql(sql, db_revision):
-    if not re.match(r"^(SELECT|WITH)\b", sql.strip(), re.I):
-        raise ValueError("Разрешены только SELECT и WITH ... SELECT.")
-    with closing(open_readonly()) as conn:
-        conn.execute("PRAGMA query_only = ON")
-        conn.set_authorizer(authorize)
-        deadline = time.monotonic() + 5
-        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-        cursor = conn.execute(sql)
-        rows = cursor.fetchmany(101)
-        if len(rows) > 100:
-            raise ValueError("Больше 100 строк: уточните запрос или используйте LIMIT 100.")
-        return pd.DataFrame(rows, columns=[c[0] for c in cursor.description])
+    rows = read_query(config.DB_PATH, sql, max_rows=100, seconds=2.0)
+    return pd.DataFrame(rows)
 
 
 def render_message(message):
@@ -118,6 +78,7 @@ def render_message(message):
 
 
 st.title("ИИ-Директор магазина VIVA HOME")
+st.caption("SQL ограничен проверяемыми колонками. Прибыль, налоги и цены этим чатом не подтверждаются.")
 with st.sidebar:
     st.header("План действий")
     if st.button("Обновить данные и план"):
@@ -175,13 +136,13 @@ for message in st.session_state.messages:
 try:
     db_revision = revision()
     schema = get_db_schema(db_revision)
-    with st.expander("Диагностика: настоящая схема базы"):
+    with st.expander("Диагностика: разрешённая схема базы"):
         st.code(schema or "Разрешённые таблицы не найдены.", language="text")
 except Exception as exc:
     st.error(f"Не удалось прочитать схему базы: {exc}")
     st.stop()
 
-if question := st.chat_input("Например: покажи убыточные товары"):
+if question := st.chat_input("Например: покажи компоненты месячного отчёта за октябрь 2026"):
     user_message = {"role": "user", "content": question}
     st.session_state.messages.append(user_message)
     render_message(user_message)
@@ -202,6 +163,9 @@ if question := st.chat_input("Например: покажи убыточные 
 Не соединяй таблицы без известных ключей и гранулярности.
 Не считай цену единицы выручкой без подтверждения; не угадывай бизнес-формулы.
 Не используй таблицы или показатели, которых нет в схеме.
+Числовые компоненты отчёта не являются подтверждённой чистой прибылью.
+Не вычисляй прибыль, налоги, минимальные цены и финансовые рекомендации.
+ABC содержит перекрывающиеся снимки: выбирай один period, не суммируй периоды.
 Если смысла полей недостаточно, верни CANNOT_ANSWER: что нужно уточнить.
 """
         with st.spinner("Составляю запрос..."):
@@ -212,7 +176,8 @@ if question := st.chat_input("Например: покажи убыточные 
         raw = response["message"]["content"].strip()
         sql = re.sub(r"^```(?:sql|sqlite)?\s*|\s*```$", "", raw, flags=re.I).strip()
         if not re.match(r"^(SELECT|WITH)\b", sql, re.I):
-            message["content"] = raw
+            message["content"] = (raw if raw.startswith("CANNOT_ANSWER") else
+                                  "CANNOT_ANSWER: модель не вернула допустимый запрос или отказ.")
         else:
             message["sql"] = sql
             with st.spinner("Читаю данные..."):

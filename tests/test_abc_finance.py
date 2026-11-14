@@ -98,7 +98,7 @@ class AbcFinanceTests(unittest.TestCase):
         def engine(cur,start,stop):
             calls.append((start,stop));return fixture()
         fake.sku_economics = engine
-        with sqlite3.connect(":memory:") as conn, patch.dict("sys.modules",{"unitka.unit_core":fake}):
+        with contextlib.closing(sqlite3.connect(":memory:")) as conn, patch.dict("sys.modules",{"unitka.unit_core":fake}):
             result = a.build_preview(conn,"2026-10-01","2026-10-31")
         self.assertEqual(calls,[("2026-10-01","2026-11-01")])
         self.assertEqual(result["sku_count"],1)
