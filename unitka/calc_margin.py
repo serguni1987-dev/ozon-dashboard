@@ -260,8 +260,9 @@ def load_period(con, start, end, stocks):
         GROUP BY sku, type_id
     """, (start, end)):
         amt = abs(_f(r["t"]))
-        if not amt or r["sku"] not in skus:
+        if not amt or r["sku"] in (None, "", 0, "0"):
             continue
+        ensure(r["sku"])
         tid = r["type_id"]
         placed = False
         for cat, ids in SERVICE_GROUPS.items():
