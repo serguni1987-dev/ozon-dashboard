@@ -1,140 +1,99 @@
-﻿"""unitka/chat_in_sheets.py — Чат с Оламой в Google Таблице (с историей)."""
-import time
+"""Google Sheets AI chat with restricted, read-only SQLite access."""
 import datetime
-import gspread
-from google.oauth2.service_account import Credentials
-from ollama import chat
-from . import config
-from .db import connect
+import json
+import time
+from .ai_sql_safety import get_schema, read_query
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
 CHAT_SHEET = "Чат с ИИ"
 MODEL = "qwen2.5:3b-instruct"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
 
 def get_db_schema():
-    conn = connect()
-    cur = conn.cursor()
-    cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    tables = [r[0] for r in cur.fetchall()]
-    schema = "Таблицы в базе:\n"
-    for t in tables:
-        cur.execute(f"PRAGMA table_info({t})")
-        cols = [c[1] for c in cur.fetchall()]
-        schema += f"- {t} ({', '.join(cols)})\n"
-    conn.close()
-    return schema
+    from . import config
+    return get_schema(config.DB_PATH)
+
 
 def execute_sql(sql_query):
+    from . import config
     try:
-        conn = connect()
-        cur = conn.cursor()
-        cur.execute(sql_query)
-        rows = cur.fetchall()
-        conn.close()
-        if not rows:
-            return "Данных не найдено."
-        result = "\n".join([str(dict(row)) for row in rows[:20]])
-        return result
-    except Exception as e:
-        return f"Ошибка SQL: {e}"
+        rows = read_query(config.DB_PATH, sql_query, max_rows=20)
+        return json.dumps(rows, ensure_ascii=False, default=str)
+    except Exception as exc:
+        return "SQL_NOT_EXECUTED: " + str(exc)
+
+
+def system_prompt(schema):
+    today = datetime.date.today().isoformat()
+    return f"""Ты составляешь запрос чтения SQLite. Сегодня {today}.
+Разрешённая схема:
+{schema}
+Для получения данных верни только [SQL] и один SELECT или WITH ... SELECT.
+Используй только перечисленные таблицы и столбцы. Не используй SELECT *.
+Не придумывай revenue или другие отсутствующие столбцы.
+Сохраняй явно указанный год. Если год не задан, не подставляй его произвольно.
+Числовые компоненты monthly_reports не являются подтверждённой чистой прибылью.
+Смысл bonus и gross_commission_sum требует согласованной методики.
+Не выводи прибыль, налоги, минимальные цены и финансовые рекомендации из этой схемы.
+ABC содержит перекрывающиеся снимки: выбирай один period, не суммируй периоды.
+Не соединяй таблицы без подтверждённых ключей и гранулярности.
+Если данных или определения показателя недостаточно, верни CANNOT_ANSWER с причиной.
+Не используй суммы из памяти или примеров; никаких фиксированных финансовых ответов.
+"""
+
 
 def main():
+    import gspread
+    from google.oauth2.service_account import Credentials
+    from ollama import chat
+    from . import config
+
     creds = Credentials.from_service_account_file(str(config.CREDENTIALS), scopes=SCOPES)
-    client = gspread.authorize(creds)
-    sh = client.open_by_key(config.SHEET_ID)
-    
+    sh = gspread.authorize(creds).open_by_key(config.SHEET_ID)
     try:
         ws = sh.worksheet(CHAT_SHEET)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=CHAT_SHEET, rows=100, cols=3)
+    if ws.acell("A1").value != "Дата":
+        ws.update(values=[["Дата", "Вопрос", "Ответ ИИ"]], range_name="A1:C1")
 
-    # Настраиваем шапку, если ее нет
-    if ws.acell('A1').value != 'Дата':
-        ws.update(values=[['Дата', 'Вопрос', 'Ответ ИИ']], range_name='A1:C1')
-        ws.format('A1:C1', {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.9, "green": 0.9, "blue": 0.9}})
-        # Делаем колонки пошире
-        sh.batch_update({"requests": [
-            {"updateDimensionProperties": {"range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 0, "endIndex": 1}, "properties": {"pixelSize": 150}, "fields": "pixelSize"}},
-            {"updateDimensionProperties": {"range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2}, "properties": {"pixelSize": 350}, "fields": "pixelSize"}},
-            {"updateDimensionProperties": {"range": {"sheetId": ws.id, "dimension": "COLUMNS", "startIndex": 2, "endIndex": 3}, "properties": {"pixelSize": 600}, "fields": "pixelSize"}}
-        ]})
-
-    print(f"Слушаю лист '{CHAT_SHEET}'... (Ctrl+C для выхода)")
-    
-    print("Загружаю контекст (схема БД, План действий)...")
-    schema = get_db_schema()
-    try:
-        plan_ws = sh.worksheet("План действий")
-        plan_data = plan_ws.get_all_values()
-        plan_text = "\n".join([" | ".join(row) for row in plan_data[1:6]])
-    except:
-        plan_text = "План действий пуст."
-
-    system_prompt = f"""Ты — ИИ-финансовый директор магазина VIVA HOME на Ozon. 
-Сейчас ноябрь 2026 года. Все данные в базе за 2026 год.
-
-СХЕМА БАЗЫ:
-{schema}
-
-ВАЖНЫЕ ПРАВИЛА:
-1. Валовая выручка = SUM(seller_price + bonus + coinvestment) из realization_daily. Или колонка revenue из monthly_reports. (Например, за октябрь это 124 246). 
-2. Если пользователь просит "выручку за вычетом возвратов" или "чистую выручку", используй sale_price. (Например, за октябрь это 63 504).
-3. Если тебе нужны данные из БД, напиши СТРОГО в формате: [SQL] ТВОЙ_ЗАПРОС_ЗДЕСЬ
-   Не пиши слова "Вот запрос", не используй ```sql. Только [SQL] и сам запрос на одной строке.
-4. Если ты уже знаешь ответ (например, из Плана действий), отвечай кратко и по делу.
-"""
-
-    last_processed_row = 1 # Начинаем со 2-й строки (после шапки)
-
+    print(f"Слушаю лист '{CHAT_SHEET}'. SQL: только ограниченное чтение.")
+    last_processed_row = 1
     while True:
         try:
-            # Получаем все вопросы из колонки B (Вопрос)
-            col_b = ws.col_values(2)
-            
-            # Если появилась новая строка с вопросом
-            if len(col_b) > last_processed_row:
-                current_row = len(col_b)
-                question = col_b[current_row - 1] # -1 т.к. индексы в питоне с 0
-                
+            questions = ws.col_values(2)
+            if len(questions) > last_processed_row:
+                current_row = len(questions)
+                question = questions[current_row - 1]
                 if question and question != "Вопрос":
-                    print(f"\nНовый вопрос (строка {current_row}): {question}")
-                    
-                    # Ставим дату и "Думаю..."
-                    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                    ws.update_cell(current_row, 1, now_str)
-                    ws.update_cell(current_row, 3, "🤔 Думаю...")
-                    
-                    # Отправляем в ИИ
-                    response = chat(model=MODEL, messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": question}
+                    ws.update_cell(current_row, 1, datetime.datetime.now().strftime("%Y-%m-%d %H:%M"))
+                    ws.update_cell(current_row, 3, "Проверяю данные...")
+                    prompt = system_prompt(get_db_schema())
+                    response = chat(model=MODEL, options={"temperature": 0}, messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": question},
                     ])
-                    answer = response['message']['content']
-                    
-                    # Если ИИ нужен SQL
-                    if "[SQL]" in answer:
-                        sql_query = answer.split("[SQL]")[1].split("\n")[0].strip()
-                        print(f"ИИ запросил данные: {sql_query}")
-                        sql_result = execute_sql(sql_query)
-                        
-                        response = chat(model=MODEL, messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": question},
-                            {"role": "assistant", "content": f"Я выполнил SQL: {sql_query}. Вот результат:\n{sql_result}"},
-                            {"role": "user", "content": "Теперь дай финальный ответ на основе этих данных."}
-                        ])
-                        answer = response['message']['content']
-                    
-                    # Записываем ответ в колонку C
+                    raw = response["message"]["content"].strip()
+                    if raw.startswith("[SQL]"):
+                        sql = raw[len("[SQL]"):].strip()
+                        result = execute_sql(sql)
+                        if result.startswith("SQL_NOT_EXECUTED:"):
+                            answer = result
+                        else:
+                            answer = ("Результат ограниченного SQL-чтения. "
+                                      "Финансовый смысл требует проверки.\nSQL: "
+                                      + sql + "\n" + result)
+                    elif raw.startswith("CANNOT_ANSWER"):
+                        answer = raw
+                    else:
+                        answer = "CANNOT_ANSWER: модель не вернула допустимый запрос или отказ."
                     ws.update_cell(current_row, 3, answer)
                     last_processed_row = current_row
-                    print("Ответ записан в таблицу.")
-                    
             time.sleep(2)
-            
-        except Exception as e:
-            print(f"Ошибка: {e}")
+        except Exception as exc:
+            print(f"Ошибка чата: {exc}")
             time.sleep(5)
+
 
 if __name__ == "__main__":
     main()
