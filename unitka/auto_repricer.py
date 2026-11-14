@@ -1,140 +1,120 @@
-﻿"""unitka/auto_repricer.py — динамическое изменение цены по индексу и конкурентам."""
+"""Price planning only. Live repricing is blocked pending financial audit."""
+from __future__ import annotations
+
 import argparse
 import logging
-from datetime import datetime, timedelta
-import gspread
-from google.oauth2.service_account import Credentials
-from .db import connect
-from .ozon_client import OzonClient
-from . import unit_core, settings, config
+import math
+from datetime import date, timedelta
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
-logger = logging.getLogger(__name__)
+log = logging.getLogger(__name__)
 
 
-def can_update(conn, offer_id):
-    one_hour_ago = (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S")
-    cur = conn.execute("SELECT COUNT(*) FROM price_update_log WHERE offer_id = ? AND updated_at > ?", (offer_id, one_hour_ago))
-    return cur.fetchone()[0] < 10
+def _positive(value):
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def build_tasks(floors, sku_to_offer, real_prices, limit=0):
+    """Build a preview, never an instruction that may be sent automatically."""
+    if limit < 0:
+        raise ValueError("limit must be non-negative")
+    mapped = {}
+    for sku, offer in sku_to_offer.items():
+        if offer:
+            mapped.setdefault(str(offer), []).append(sku)
+    tasks = []
+    for sku, floor in floors.items():
+        offer = sku_to_offer.get(sku)
+        if not offer or len(mapped.get(str(offer), [])) != 1:
+            continue
+        current = _positive(real_prices.get(offer))
+        minimum = _positive(floor.get("min_direct"))
+        if current is None or minimum is None or current >= minimum:
+            continue
+        new = round(min(minimum * 1.02, current * 1.15), 2)
+        if not math.isfinite(new) or new <= current:
+            continue
+        tasks.append({"offer_id": offer, "old": current, "new": new,
+                      "min_direct": minimum, "still_below_floor": new < minimum})
+    tasks.sort(key=lambda item: (item["old"], str(item["offer_id"])))
+    return tasks[:limit] if limit else tasks
 
 
 def get_real_prices(client, offer_ids):
-    """Получает реальные цены через API v5 (постранично)."""
-    real_prices = {}
-    for i in range(0, len(offer_ids), 1000):
-        chunk = offer_ids[i:i+1000]
-        payload = {"filter": {"offer_id": chunk}, "limit": len(chunk), "cursor": ""}
-        try:
-            data = client._post("/v5/product/info/prices", payload)
-            for item in data.get("items", []):
-                oid = item.get("offer_id")
-                p = float(item.get("price", {}).get("price", 0) or 0)
-                real_prices[oid] = p
-        except Exception as e:
-            logger.error(f"Ошибка запроса цен v5: {e}")
-    return real_prices
+    """Read prices; errors abort the preview instead of using partial results."""
+    prices = {}
+    offers = list(dict.fromkeys(offer_ids))
+    for offset in range(0, len(offers), 1000):
+        chunk = offers[offset:offset + 1000]
+        data = client._post("/v5/product/info/prices", {
+            "filter": {"offer_id": chunk}, "limit": len(chunk), "cursor": ""})
+        items = data.get("items")
+        if not isinstance(items, list):
+            raise ValueError("Invalid price response: items must be a list")
+        if data.get("has_next") or data.get("cursor"):
+            raise ValueError("Incomplete price response: pagination needs review")
+        for item in items:
+            offer = item.get("offer_id")
+            price = _positive((item.get("price") or {}).get("price"))
+            if offer in chunk and price is not None:
+                if offer in prices:
+                    raise ValueError("Duplicate offer in price response")
+                prices[offer] = price
+    return prices
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dry-run", action="store_true", help="Только показать план")
-    parser.add_argument("--limit", type=int, default=0, help="Сколько товаров обновить (0 = все)")
-    args = parser.parse_args()
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--dry-run", action="store_true", help="Preview (default)")
+    modes.add_argument("--apply", action="store_true", help="Blocked pending audit")
+    parser.add_argument("--limit", type=int, default=0)
+    args = parser.parse_args(argv)
+    if args.limit < 0:
+        parser.error("--limit must be non-negative")
+    if args.apply:
+        parser.error("Live repricing is BLOCKED pending financial audit; use --dry-run")
 
+    # No optional dependency, DB or API is touched before the safety gate above.
+    import gspread
+    from google.oauth2.service_account import Credentials
+    from . import config, settings, unit_core
+    from .db import connect
+    from .finance_core import tax_settings
+    from .ozon_client import OzonClient
+
+    scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    credentials = Credentials.from_service_account_file(str(config.CREDENTIALS), scopes=scopes)
+    sheet = gspread.authorize(credentials).open_by_key(config.SHEET_ID)
+    today = date.today()
     conn = connect()
-    cur = conn.cursor()
-    conn.execute("CREATE TABLE IF NOT EXISTS price_update_log (offer_id TEXT, updated_at TEXT, old_price REAL, new_price REAL)")
-    conn.commit()
-
-    logger.info("Считаем минимальные цены (пол)...")
-    SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    creds = Credentials.from_service_account_file(str(config.CREDENTIALS), scopes=SCOPES)
-    sh = gspread.authorize(creds).open_by_key(config.SHEET_ID)
-    
-    tax = {"rate_pct": 5.0, "regime": "income_minus_expense"}
-    unit = settings.unit_params(sh)
-    
-    eco = unit_core.sku_economics(cur, "2026-01-01", "2027-01-01")
-    true_floors = unit_core.min_prices(cur, eco, tax, unit)
-
-    cur.execute("SELECT ozon_sku, offer_id FROM sku_map WHERE offer_id IS NOT NULL AND offer_id != ''")
-    sku_to_offer = {int(r[0]): r[1] for r in cur.fetchall()}
-    
-    offer_ids = list(sku_to_offer.values())
-    client = OzonClient()
-    
-    logger.info("Получаем реальные цены из Ozon...")
-    real_prices = get_real_prices(client, offer_ids)
-
-    tasks = []
-    for sku_int, f_data in true_floors.items():
-        offer_id = sku_to_offer.get(sku_int)
-        if not offer_id: continue
-        
-        current_price = real_prices.get(offer_id, 0)
-        if current_price == 0: continue
-        
-        min_price = f_data.get("min_direct") or 0
-        if min_price == 0: continue
-
-        # ЛОГИКА ЦЕНООБРАЗОВАНИЯ:
-        # Если мы продаем в убыток (ниже пола) -> поднимаем, но не более чем на 15% за раз
-        if current_price < min_price:
-            target_price = round(min_price * 1.02, 2)       # Идеальная цена (пол + 2%)
-            max_step_price = round(current_price * 1.15, 2) # Максимум +15% за раз
-            
-            if target_price > max_step_price:
-                new_price = max_step_price
-                reason = "Выход из убытка (плавный шаг +15%)"
-            else:
-                new_price = target_price
-                reason = "Выход из убытка"
-                
-            tasks.append({"offer_id": offer_id, "old": current_price, "new": new_price, "reason": reason})
-
-    logger.info(f"Найдено задач: {len(tasks)}")
-    if not tasks: 
+    try:
+        cur = conn.cursor()
+        eco = unit_core.sku_economics(cur, f"{today.year}-01-01", (today + timedelta(days=1)).isoformat())
+        floors = unit_core.min_prices(cur, eco, tax_settings(sheet), settings.unit_params(sheet))
+        rows = cur.execute("SELECT ozon_sku, offer_id FROM sku_map WHERE offer_id IS NOT NULL AND offer_id != ''").fetchall()
+        sku_to_offer = {}
+        for sku, offer in rows:
+            sku = int(sku)
+            if sku in sku_to_offer and sku_to_offer[sku] != offer:
+                raise ValueError("Ambiguous SKU mapping")
+            sku_to_offer[sku] = offer
+        prices = get_real_prices(OzonClient(), list(sku_to_offer.values()))
+        tasks = build_tasks(floors, sku_to_offer, prices, args.limit)
+        log.warning("PREVIEW ONLY: financial inputs are not yet fully audited; live writes blocked")
+        for task in tasks:
+            log.info("%s: %.2f -> %.2f; floor %.2f; remains below floor: %s",
+                     task["offer_id"], task["old"], task["new"],
+                     task["min_direct"], task["still_below_floor"])
+        log.info("Preview tasks: %s; prices sent: 0", len(tasks))
+        return 0
+    finally:
         conn.close()
-        return
 
-    # Сортируем по размеру убытка (сначала самые дешевые/убыточные)
-    tasks.sort(key=lambda x: x["old"], reverse=False) 
-    if args.limit > 0: 
-        tasks = tasks[:args.limit]
-
-    if args.dry_run:
-        for t in tasks:
-            logger.info(f"  {t['offer_id']}: {t['old']:,.0f} -> {t['new']:,.0f} ({t['reason']})")
-        conn.close()
-        return
-
-    # Отправка в API
-    success = 0
-    for t in tasks:
-        if not can_update(conn, t["offer_id"]):
-            logger.warning(f"  [{t['offer_id']}] Лимит 10 раз в час. Пропускаем.")
-            continue
-
-        logger.info(f"  Меняем {t['offer_id']}: {t['old']:,.0f} -> {t['new']:,.0f}")
-        old_price = str(round(t["new"] * 1.2, 2)) # Зачеркнутая цена на 20% выше
-        payload = [{"offer_id": t["offer_id"], "price": str(t["new"]), "old_price": old_price}]
-        
-        try:
-            res = client.update_prices(payload)
-            result_list = res.get("result", [])
-            # Проверяем ответ Ozon!
-            if result_list and result_list[0].get("updated") is True:
-                conn.execute("INSERT INTO price_update_log VALUES (?, ?, ?, ?)", 
-                             (t["offer_id"], datetime.now().strftime("%Y-%m-%d %H:%M:%S"), t["old"], t["new"]))
-                conn.commit()
-                success += 1
-            else:
-                logger.error(f"  Отклонено Ozon: {result_list[0].get('errors') if result_list else 'Пустой ответ'}")
-        except Exception as e:
-            logger.error(f"  Ошибка API: {e}")
-
-    logger.info(f"Успешно обновлено: {success} из {len(tasks)}")
-    conn.close()
 
 if __name__ == "__main__":
-    main()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
+    raise SystemExit(main())
