@@ -66,7 +66,7 @@ def render_message(message):
                     st.code(message["error"], language="text")
         if "data" in message:
             df = message["data"]
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
             numeric = list(df.select_dtypes(include="number").columns)
             if "date" in df.columns and numeric:
                 try:
