@@ -1,4 +1,4 @@
-﻿"""unitka/calc_action_plan.py — Умный план действий на основе rules.py.
+"""unitka/calc_action_plan.py — Умный план действий на основе rules.py.
 
     py -m unitka.calc_action_plan            пересчитать и записать лист «План действий»
     py -m unitka.calc_action_plan --local    только посчитать и напечатать, без Google Sheets
@@ -7,15 +7,10 @@
 минимальная цена — «в ноль» с комиссией, логистикой и налогом; маржа — после расходов Ozon.
 """
 import argparse
-import gspread
-from google.oauth2.service_account import Credentials
 from datetime import date, timedelta
-from .db import connect
-from . import config, rules, unit_core
+from . import rules, unit_core
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-CRED = str(config.CREDENTIALS)
-SHEET_ID = config.SHEET_ID
 SHEET_TITLE = "План действий"
 N_COLS = 8                      # A:G видит менеджер, H — служебный rule_id (скрыт)
 DATA_START_ROW = 3              # индекс первой строки данных (после заголовка, шапки и пустой строки)
@@ -73,6 +68,17 @@ def _days_since(iso: str, today: date) -> int:
         return 0
 
 
+def _calendar_window(today: date, days: int) -> tuple[str, str]:
+    """Exactly N calendar dates including today; the end is exclusive.
+
+    The current date can be incomplete. This is not an as-of inventory backtest.
+    """
+    if isinstance(days, bool) or not isinstance(days, int) or days <= 0:
+        raise ValueError("days must be a positive integer")
+    return ((today - timedelta(days=days - 1)).isoformat(),
+            (today + timedelta(days=1)).isoformat())
+
+
 def collect_sku_data(cur, tax=None, unit=None, today=None):
     """Собирает паспорта всех активных SKU для проверки правилами.
 
@@ -90,12 +96,11 @@ def collect_sku_data(cur, tax=None, unit=None, today=None):
         days_no_sales  дней с последней продажи; если продаж не было — с первого появления на складе
     """
     today = today or date.today()
-    tomorrow = (today + timedelta(days=1)).isoformat()
-    d30 = (today - timedelta(days=30)).isoformat()
-    d14 = (today - timedelta(days=14)).isoformat()
+    d30, tomorrow = _calendar_window(today, 30)
+    d14, _ = _calendar_window(today, 14)
 
     # 1. Мин. цены и текущие цены — по экономике с начала года (как в «Юнит-сводке»)
-    eco_year = unit_core.sku_economics(cur, f"{today.year}-01-01", f"{today.year + 1}-01-01")
+    eco_year = unit_core.sku_economics(cur, f"{today.year}-01-01", tomorrow)
     mins = unit_core.min_prices(cur, eco_year, tax, unit)
 
     # 2. Маржа за 30 дней и продажи за 14 дней — тот же расчёт на коротком периоде
@@ -156,6 +161,7 @@ def main():
     ap.add_argument("--local", action="store_true", help="без Google Sheets: посчитать и напечатать")
     args = ap.parse_args()
 
+    from .db import connect
     conn = connect()
     cur = conn.cursor()
 
@@ -168,11 +174,13 @@ def main():
         return
 
     # Настройки с листа «НАСТРОЙКИ»: налог, целевая маржа, пороги правил
-    from . import settings
+    import gspread
+    from google.oauth2.service_account import Credentials
+    from . import config, settings
     from .finance_core import tax_settings
-    creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)
+    creds = Credentials.from_service_account_file(str(config.CREDENTIALS), scopes=SCOPES)
     client = gspread.authorize(creds)
-    sh = client.open_by_key(SHEET_ID)
+    sh = client.open_by_key(config.SHEET_ID)
     try:
         grid = settings.read_grid(sh)
         unit, thresholds = settings.unit_params(grid=grid), settings.rule_params(grid=grid)
