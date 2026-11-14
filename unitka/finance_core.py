@@ -112,20 +112,23 @@ def ozon_pnl(cur, date_from: str, date_to: str) -> dict:
 
     # Себестоимость с учётом возвратов: по месячным отчётам о реализации (закрытые месяцы),
     # по начислениям accruals — для месяцев, которых ещё нет в monthly_realization_rows.
-    m_from, m_to = date_from[:7], date_to[:7]
-    # В monthly_realization_rows quantity = кол-во доставленных (delivery_commission.quantity),
-    # возвраты лежат только в raw_json (return_commission.quantity); строка «только возврат»
-    # имеет quantity = 0. Поэтому нетто-штуки считаем как доставлено − возвращено из raw_json.
-    cogs_monthly = _one(cur, f"""
-        SELECT COALESCE(SUM(
-            (COALESCE(json_extract(m.raw_json, '$.delivery_commission.quantity'), m.quantity, 0)
-             - COALESCE(json_extract(m.raw_json, '$.return_commission.quantity'), 0)) * c.cost_price), 0)
-        FROM monthly_realization_rows m
-        LEFT JOIN ({_COST_LATEST}) c ON m.sku = c.sku
-        WHERE m.month >= ? AND m.month < ?""", (m_from, m_to))
-
-    cur.execute("SELECT DISTINCT month FROM monthly_realization_rows WHERE month >= ? AND month < ?", (m_from, m_to))
-    closed_months = {r[0] for r in cur.fetchall()}
+    # Monthly quantities are valid only when the whole month is in the range.
+    # Partial months keep the existing daily estimate from accruals.
+    cur.execute("SELECT DISTINCT month FROM monthly_realization_rows")
+    available_months = {r[0] for r in cur.fetchall()}
+    closed_months = set()
+    cogs_monthly = 0.0
+    for month, _start, _end in _month_bounds(date_from, date_to):
+        if month not in available_months:
+            continue
+        closed_months.add(month)
+        cogs_monthly += _one(cur, f"""
+            SELECT COALESCE(SUM(
+                (COALESCE(json_extract(m.raw_json, '$.delivery_commission.quantity'), m.quantity, 0)
+                 - COALESCE(json_extract(m.raw_json, '$.return_commission.quantity'), 0)) * c.cost_price), 0)
+            FROM monthly_realization_rows m
+            LEFT JOIN ({_COST_LATEST}) c ON m.sku = c.sku
+            WHERE m.month = ?""", (month,))
 
     # Открытые месяцы (ещё нет отчёта о реализации): оценка по начислениям accruals.
     # Строка POSTING с ценой > 0 = 1 проданная штука, с ценой < 0 = 1 возврат
