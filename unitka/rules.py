@@ -54,20 +54,31 @@ def set_thresholds(values: dict | None) -> None:
             THRESHOLDS[key] = number
 
 
+def _price_review_action(min_price, price):
+    if min_price is not None and min_price > 0 and price is not None and price > 0:
+        return (f"Проверить расчётный порог {_rub(min_price)} ₽ и текущую цену {_rub(price)} ₽, "
+                "тарифы и акции; изменение цены согласовать отдельно")
+    return ("Проверить себестоимость, комиссию, услуги и возвраты; "
+            "не менять цену по неподтверждённому порогу")
+
+
 def check_price_below_min(sku_data: dict) -> Optional[Task]:
-    """Existing price-gap rule; monetary interpretation is audited separately."""
-    price = sku_data.get("price", 0)
-    min_price = sku_data.get("min_price", 0)
-    stock = sku_data.get("stock", 0)
-    if stock > 0 and price > 0 and price < min_price:
-        loss_per_unit = min_price - price
-        total_loss = loss_per_unit * stock
-        return Task(
-            rule_id="price_below_min", severity=1, sku=sku_data["sku"],
-            offer_id=sku_data.get("offer_id", ""),
-            problem=f"Цена {_rub(price)} ₽ ниже минимальной {_rub(min_price)} ₽",
-            action=f"Поднять цену до {_rub(min_price)} ₽", money_impact=total_loss)
-    return None
+    """Report a model-price gap, not a proven cash loss or an approved price."""
+    price = _finite(sku_data.get("price"))
+    min_price = _finite(sku_data.get("min_price"))
+    stock = _finite(sku_data.get("stock"))
+    if (price is None or min_price is None or stock is None
+            or stock <= 0 or price <= 0 or min_price <= 0 or price >= min_price):
+        return None
+    gap = (min_price - price) * stock
+    if not math.isfinite(gap):
+        return None
+    return Task(
+        rule_id="price_below_min", severity=1, sku=sku_data["sku"],
+        offer_id=sku_data.get("offer_id", ""),
+        problem=(f"Цена {_rub(price)} ₽ ниже расчётного порога {_rub(min_price)} ₽ "
+                 "(ценовой разрыв, не денежный убыток)"),
+        action=_price_review_action(min_price, price), money_impact=gap)
 
 
 def check_out_of_stock(sku_data: dict) -> Optional[Task]:
@@ -118,25 +129,27 @@ def check_dead_stock(sku_data: dict, threshold_days: Optional[int] = None) -> Op
 
 
 def check_negative_margin(sku_data: dict) -> Optional[Task]:
-    margin_pct = sku_data.get("margin_pct", 0)
-    revenue_30d = sku_data.get("revenue_30d", 0)
-    if margin_pct < THRESHOLDS["negative_margin_pct"] and revenue_30d > 0:
-        loss = abs(revenue_30d * (margin_pct / 100))
-        price = sku_data.get("price", 0)
-        min_price = sku_data.get("min_price", 0)
-        if min_price > 0 and 0 < price < min_price:
-            action = f"Поднять цену до {_rub(min_price)} ₽ (сейчас {_rub(price)} ₽)"
-        elif min_price > 0 and price >= min_price:
-            action = (f"Цена {_rub(price)} ₽ уже выше минимальной {_rub(min_price)} ₽ — "
-                      "проверить акции и возвраты за 30 дней")
-        else:
-            action = "Поднять цену или отключить товар"
-        return Task(
-            rule_id="negative_margin", severity=1, sku=sku_data["sku"],
-            offer_id=sku_data.get("offer_id", ""),
-            problem=f"Маржинальность {margin_pct:.1f}% (убыток {_rub(loss)} ₽ за 30 дней)",
-            action=action, money_impact=loss)
-    return None
+    """Keep the direct-margin estimate, but require review before price changes."""
+    margin_pct = _finite(sku_data.get("margin_pct"))
+    revenue_30d = _finite(sku_data.get("revenue_30d"))
+    if (margin_pct is None or revenue_30d is None or revenue_30d <= 0
+            or margin_pct >= THRESHOLDS["negative_margin_pct"]):
+        return None
+    loss = abs(revenue_30d * (margin_pct / 100))
+    if not math.isfinite(loss):
+        return None
+    price = _finite(sku_data.get("price"))
+    min_price = _finite(sku_data.get("min_price"))
+    action = _price_review_action(min_price, price)
+    if min_price is not None and min_price > 0 and price is not None and price >= min_price:
+        action = (f"Цена {_rub(price)} ₽ уже выше расчётного порога {_rub(min_price)} ₽ — "
+                  "проверить акции, услуги и возвраты за 30 дней; изменение цены согласовать отдельно")
+    return Task(
+        rule_id="negative_margin", severity=1, sku=sku_data["sku"],
+        offer_id=sku_data.get("offer_id", ""),
+        problem=(f"Маржинальность {margin_pct:.1f}% "
+                 f"(оценка прямого убытка {_rub(loss)} ₽ за 30 дней)"),
+        action=action, money_impact=loss)
 
 
 ALL_RULES = [check_price_below_min, check_out_of_stock, check_dead_stock, check_negative_margin]
