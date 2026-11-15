@@ -11,6 +11,7 @@ from .calc_taxes import build as build_taxes
 from .finance_core import receivables as calc_receivables, inventory_value, tax_settings
 from . import settings, unit_core
 from . import calc_funnel
+from .purchase_candidates import forecast_candidates, candidate_text
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRED = os.path.join(APP_DIR, "app", "credentials.json")
@@ -63,20 +64,26 @@ def _load_content_ratings():
 
 
 def _load_purchase_recommendations():
+    """Forecast candidates only; database errors must remain visible."""
     conn = connect()
-    cur = conn.cursor()
     try:
-        cur.execute("""
-            SELECT COALESCE(NULLIF(p.offer_id, ''), f.sku), f.forecast_qty, f.forecast_revenue
-            FROM forecast f LEFT JOIN products p ON p.sku = CAST(f.sku AS INTEGER)
-            WHERE f.forecast_qty > 0
-            ORDER BY f.forecast_qty DESC LIMIT 5
-        """)
-        data = [{"sku": r[0], "qty": r[1], "revenue": r[2]} for r in cur.fetchall()]
-    except Exception:
-        data = []
-    conn.close()
-    return data
+        cur = conn.cursor()
+        cur.execute("SELECT f.sku, p.offer_id, f.forecast_qty, f.forecast_revenue FROM forecast f LEFT JOIN products p ON p.sku = CAST(f.sku AS INTEGER)")
+        rows = [{"sku": r[0], "offer_id": r[1], "forecast_qty": r[2], "forecast_revenue": r[3]} for r in cur.fetchall()]
+        return forecast_candidates(rows)[:5]
+    finally:
+        conn.close()
+
+
+def _purchase_rows(purchases):
+    rows = [["ПРОГНОЗ СПРОСА: КАНДИДАТЫ НА ПРОВЕРКУ (топ-5)", "", "", "", ""]]
+    rows.append(["Это не план закупки. Остатки и полная экономика требуют проверки.", "", "", "", ""])
+    if purchases:
+        rows.extend([[candidate_text(p), "", "", "", ""] for p in purchases])
+    else:
+        rows.append(["В прогнозе нет подходящих кандидатов; закупка не согласована.", "", "", "", ""])
+    rows.append(["", "", "", "", ""])
+    return rows
 
 
 def _load_strategies(sh):
@@ -433,20 +440,8 @@ def main():
         values.append(["🟢 Проблем в воронке не обнаружено.", "", "", "", ""])
     values.append(["", "", "", "", ""])
 
-    # 5. Закупки
-    values.append(["ЗАКУПКИ (топ-5)", "", "", "", ""])
-    if res["purchases"]:
-        for p in res["purchases"]:
-            below = res.get("price_below", {}).get(str(p["sku"]))
-            if below:
-                # Спрос есть, но товар продаётся в убыток — закупка только увеличит потери.
-                values.append([f"⛔ {p['sku']}: спрос {p['qty']:.0f} шт, но цена {below[0]:,.0f} ₽ ниже минимальной "
-                               f"{below[1]:,.0f} ₽ — не закупать, пока цена не поднята", "", "", "", ""])
-                continue
-            values.append([f"🟡 {p['sku']}: закупить {p['qty']:.0f} шт (прогноз выручки {p['revenue']:,.0f} ₽)", "", "", "", ""])
-    else:
-        values.append(["Нет рекомендаций по закупкам", "", "", "", ""])
-    values.append(["", "", "", "", ""])
+    # 5. Forecast candidates are not approved purchases.
+    values.extend(_purchase_rows(res["purchases"]))
 
     # 6. Ассортимент
     values.append(["АССОРТИМЕНТ", "", "", "", ""])
@@ -485,7 +480,7 @@ def main():
     print(f"  Стратегий: {len(res['strategies'])}")
     print(f"  KPI-отклонений: {len(res['kpi_deviations'])}")
     print(f"  Проблем воронки: {len(res['funnel_plan'])}")
-    print(f"  Закупок: {len(res['purchases'])}")
+    print(f"  Кандидатов прогноза (не план закупки): {len(res['purchases'])}")
     print(f"  Ближайший платёж: {res['next_payment']}")
     print(f"  Выручка: {res['rev_current']:,.0f} ₽ — {res['rev_delta']}")
 
