@@ -172,6 +172,39 @@ def render_rows(blocks, now_str, source_dates):
     return rows, fmt_marks
 
 
+def _validate_report(rows, fmt_marks):
+    import math
+    if not isinstance(rows, list) or not rows or not any(rows):
+        raise ValueError("Empty report")
+    for row in rows:
+        if not isinstance(row, list) or len(row) > 9:
+            raise ValueError("Invalid report row")
+        for cell in row:
+            if type(cell) not in (str, int, float, bool):
+                raise ValueError("Unsupported cell value")
+            if isinstance(cell, float) and not math.isfinite(cell):
+                raise ValueError("Non-finite report value")
+    seen = set()
+    for index, kind in fmt_marks:
+        if type(index) is not int or not 0 <= index < len(rows):
+            raise ValueError("Invalid formatting index")
+        if index in seen or kind not in {"title", "period", "items_header", "totals_row"}:
+            raise ValueError("Invalid formatting marker")
+        seen.add(index)
+
+
+def _write_report_values(ws, rows):
+    """Replace owned worksheet values without a separate destructive clear."""
+    _validate_report(rows, [])
+    height = max(ws.row_count, len(rows))
+    width = max(ws.col_count, 9)
+    values = [row + [""] * (width - len(row)) for row in rows]
+    values.extend([[""] * width for _ in range(height - len(values))])
+    if height > ws.row_count or width > ws.col_count:
+        ws.resize(rows=height, cols=width)
+    ws.update(values=values, range_name="A1", value_input_option="RAW")
+
+
 def main():
     conn = connect()
     try:
@@ -187,6 +220,10 @@ def main():
     finally:
         conn.close()
 
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    rows, fmt_marks = render_rows(blocks, now_str, source_dates)
+    _validate_report(rows, fmt_marks)
+
     creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)
     client = gspread.authorize(creds)
     sh = client.open_by_key(SHEET_ID)
@@ -195,13 +232,10 @@ def main():
         ws = sh.worksheet("Юнит-сводка")
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title="Юнит-сводка", rows=500, cols=12)
-    ws.clear()
 
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
-    rows, fmt_marks = render_rows(blocks, now_str, source_dates)
 
     # Записываем всё
-    ws.update(values=rows, range_name="A1")
+    _write_report_values(ws, rows)
 
     # === ФОРМАТИРОВАНИЕ ===
     reqs = []
