@@ -1,8 +1,9 @@
-﻿"""calc_unit_summary.py — юнит-сводка по трём периодам: год, прошлый месяц, текущий."""
+"""calc_unit_summary.py — юнит-сводка по трём периодам: год, прошлый месяц, текущий."""
 import os, gspread
 from datetime import datetime, date, timedelta
 from google.oauth2.service_account import Credentials
 from .db import connect
+from .unit_core import sku_economics
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRED = os.path.join(APP_DIR, "app", "credentials.json")
@@ -39,75 +40,62 @@ def _load_offer_map(cur):
 
 
 def build_period(conn, cur, offer_map, date_from, date_to):
-    cur.execute("""
-        SELECT
-            r.sku,
-            COALESCE(SUM(r.sale_price + r.bonus + r.coinvestment), 0) AS revenue,
-            COALESCE(SUM(CASE WHEN r.is_return = 0 THEN r.quantity * c.cost_price ELSE 0 END), 0) AS cogs,
-            COALESCE(SUM(s.total_exp), 0) AS ozon_exp
-        FROM realization_daily r
-        LEFT JOIN (
-            SELECT sku, cost_price FROM product_cost_history
-            WHERE (sku, date_from) IN (SELECT sku, MAX(date_from) FROM product_cost_history GROUP BY sku)
-        ) c ON r.sku = c.sku
-        LEFT JOIN (SELECT sku, date, SUM(ABS(amount)) as total_exp
-                   FROM accrual_sku_daily GROUP BY sku, date) s
-            ON r.sku = s.sku AND r.date = s.date
-        WHERE r.date BETWEEN ? AND ?
-        GROUP BY r.sku
-    """, (date_from, date_to))
-
+    """Adapt SKU economics; public date_to remains inclusive."""
+    end_exclusive = (date.fromisoformat(date_to) + timedelta(days=1)).isoformat()
+    eco = sku_economics(cur, date_from, end_exclusive)
     items = []
     totals = {"revenue": 0.0, "cogs": 0.0, "exp": 0.0, "profit": 0.0}
-
-    for sku, revenue, cogs, exp in cur.fetchall():
-        if revenue == 0 and cogs == 0 and exp == 0:
+    for sku, s in eco["skus"].items():
+        revenue = s["income"]
+        cogs = s["cogs"]
+        exp = s["commission"] + s["svc_fixed"] + s["svc_pct"] + s["overhead"]
+        profit = s["profit"]
+        if revenue == 0 and cogs == 0 and exp == 0 and profit == 0:
             continue
-        profit = revenue - cogs - exp
-        min_price = (cogs + exp) * 1.15 if (cogs + exp) > 0 else 0
-        offer_id = offer_map.get(str(sku), '')
-        status = "Убыточный" if profit < 0 else ("Прибыльный" if profit > 0 else "Ноль")
-        margin = (profit / revenue * 100) if revenue != 0 else 0
         items.append({
-            'offer_id': offer_id, 'sku': sku,
-            'revenue': revenue, 'cogs': cogs, 'exp': exp,
-            'profit': profit, 'min_price': min_price,
-            'status': status, 'margin': margin,
+            "offer_id": s.get("offer_id") or offer_map.get(str(sku), ""),
+            "sku": sku, "revenue": revenue, "cogs": cogs, "exp": exp,
+            "profit": profit, "min_price": None,
+            "status": "Убыточный" if profit < 0 else ("Прибыльный" if profit > 0 else "Ноль"),
+            "margin": profit / revenue * 100 if revenue != 0 else 0,
         })
-        totals["revenue"] += revenue
-        totals["cogs"] += cogs
-        totals["exp"] += exp
-        totals["profit"] += profit
-
-    items.sort(key=lambda x: x['profit'])
-    return {'items': items, 'totals': totals}
+        for key, value in (("revenue", revenue), ("cogs", cogs), ("exp", exp), ("profit", profit)):
+            totals[key] += value
+    items.sort(key=lambda item: item["profit"])
+    return {"items": items, "totals": totals}
 
 
 def build():
-    conn = connect(); cur = conn.cursor()
-    offer_map = _load_offer_map(cur)
-    _, d_from, d_to = _periods()[0]
-    result = build_period(conn, cur, offer_map, d_from, d_to)
-    conn.close()
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        offer_map = _load_offer_map(cur)
+        _, d_from, d_to = _periods()[0]
+        result = build_period(conn, cur, offer_map, d_from, d_to)
+    finally:
+        conn.close()
     return {
-        'total_revenue': result['totals']['revenue'],
-        'total_cogs': result['totals']['cogs'],
-        'total_exp': result['totals']['exp'],
-        'total_profit': result['totals']['profit'],
-        'items': result['items'],
+        "total_revenue": result["totals"]["revenue"],
+        "total_cogs": result["totals"]["cogs"],
+        "total_exp": result["totals"]["exp"],
+        "total_profit": result["totals"]["profit"],
+        "items": result["items"],
     }
 
 
 def main():
-    conn = connect(); cur = conn.cursor()
-    offer_map = _load_offer_map(cur)
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        offer_map = _load_offer_map(cur)
 
-    periods = _periods()
-    blocks = []
-    for title, d_from, d_to in periods:
-        b = build_period(conn, cur, offer_map, d_from, d_to)
-        blocks.append({'title': title, 'from': d_from, 'to': d_to, **b})
-    conn.close()
+        periods = _periods()
+        blocks = []
+        for title, d_from, d_to in periods:
+            b = build_period(conn, cur, offer_map, d_from, d_to)
+            blocks.append({'title': title, 'from': d_from, 'to': d_to, **b})
+    finally:
+        conn.close()
 
     creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)
     client = gspread.authorize(creds)
@@ -156,7 +144,7 @@ def main():
         fmt_marks.append((len(rows) - 1, 'period'))
         rows.append([])
 
-        rows.append(["Артикул", "SKU", "Выручка", "COGS", "Расходы Ozon", "Прибыль", "Мин. цена", "Маржа %", "Статус"])
+        rows.append(["Артикул", "SKU", "Выручка", "COGS", "Расходы Ozon", "Прибыль", "Мин. цена (не рассчитана)", "Маржа %", "Статус"])
         fmt_marks.append((len(rows) - 1, 'items_header'))
 
         if items:
@@ -165,7 +153,7 @@ def main():
                     it['offer_id'] or "", it['sku'],
                     round(it['revenue'], 2), round(it['cogs'], 2),
                     round(it['exp'], 2), round(it['profit'], 2),
-                    round(it['min_price'], 2), round(it['margin'], 1),
+                    "", round(it['margin'], 1),
                     it['status'],
                 ])
         else:
