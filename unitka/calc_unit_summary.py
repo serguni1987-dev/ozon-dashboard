@@ -62,7 +62,8 @@ def build_period(conn, cur, offer_map, date_from, date_to):
         for key, value in (("revenue", revenue), ("cogs", cogs), ("exp", exp), ("profit", profit)):
             totals[key] += value
     items.sort(key=lambda item: item["profit"])
-    return {"items": items, "totals": totals}
+    return {"items": items, "totals": totals,
+            "cogs_estimated": eco.get("totals", {}).get("cogs_estimated")}
 
 
 def build():
@@ -83,36 +84,37 @@ def build():
     }
 
 
-def main():
-    conn = connect()
-    try:
-        cur = conn.cursor()
-        offer_map = _load_offer_map(cur)
+def _source_dates(cur):
+    """Latest recorded dates, not a guarantee of complete loading."""
+    result = {}
+    for table in ("accruals", "finance_transactions", "accruals_services"):
+        cur.execute(f"SELECT MAX(date) FROM {table}")
+        row = cur.fetchone()
+        result[table] = row[0] if row else None
+    return result
 
-        periods = _periods()
-        blocks = []
-        for title, d_from, d_to in periods:
-            b = build_period(conn, cur, offer_map, d_from, d_to)
-            blocks.append({'title': title, 'from': d_from, 'to': d_to, **b})
-    finally:
-        conn.close()
 
-    creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)
-    client = gspread.authorize(creds)
-    sh = client.open_by_key(SHEET_ID)
+def _quality_note(block):
+    estimated = block.get("cogs_estimated")
+    if estimated is True:
+        return "Себестоимость включает оценку незакрытого периода."
+    if estimated is False:
+        return "Ядро не помечает себестоимость как оценочную; это не подтверждает полноту данных."
+    return "Признак оценки себестоимости недоступен."
 
-    try:
-        ws = sh.worksheet("Юнит-сводка")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="Юнит-сводка", rows=500, cols=12)
-    ws.clear()
 
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+def render_rows(blocks, now_str, source_dates):
+    """Build cell values and formatting markers without external access."""
     rows = [[f"ЮНИТ-СВОДКА — обновлено {now_str}"]]
     fmt_marks = [(0, 'title')]
+    rows.append(["Даты последних записей в источниках; не подтверждают полноту загрузки"])
+    for source, latest in source_dates.items():
+        rows.append([source, latest or "нет записей"])
+    rows.append(["Прибыль — валовая по ядру; не чистая после всех налогов и внешних расходов."])
+    rows.append([])
 
     # --- ВЕРХНИЙ БЛОК: КРАТКАЯ СВОДКА ---
-    rows.append(["Период", "SKU", "Убыточных", "Выручка", "Себестоимость", "Расходы Ozon", "Прибыль", "Маржа %"])
+    rows.append(["Период", "SKU", "Убыточных", "Выручка", "Себестоимость", "Расходы Ozon", "Валовая прибыль", "Маржа %"])
     fmt_marks.append((len(rows) - 1, 'items_header'))
     
     for block in blocks:
@@ -142,9 +144,11 @@ def main():
 
         rows.append([f"=== {block['title']} ==="])
         fmt_marks.append((len(rows) - 1, 'period'))
+        rows.append([f"Расчётный интервал: {block['from']} — {block['to']} включительно"])
+        rows.append([_quality_note(block)])
         rows.append([])
 
-        rows.append(["Артикул", "SKU", "Выручка", "COGS", "Расходы Ozon", "Прибыль", "Мин. цена (не рассчитана)", "Маржа %", "Статус"])
+        rows.append(["Артикул", "SKU", "Выручка", "COGS", "Расходы Ozon", "Валовая прибыль", "Мин. цена (не рассчитана)", "Маржа %", "Статус"])
         fmt_marks.append((len(rows) - 1, 'items_header'))
 
         if items:
@@ -159,6 +163,37 @@ def main():
         else:
             rows.append(["(нет данных за период)"])
         rows.append([])
+
+    return rows, fmt_marks
+
+
+def main():
+    conn = connect()
+    try:
+        cur = conn.cursor()
+        offer_map = _load_offer_map(cur)
+
+        source_dates = _source_dates(cur)
+        periods = _periods()
+        blocks = []
+        for title, d_from, d_to in periods:
+            b = build_period(conn, cur, offer_map, d_from, d_to)
+            blocks.append({'title': title, 'from': d_from, 'to': d_to, **b})
+    finally:
+        conn.close()
+
+    creds = Credentials.from_service_account_file(CRED, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(SHEET_ID)
+
+    try:
+        ws = sh.worksheet("Юнит-сводка")
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title="Юнит-сводка", rows=500, cols=12)
+    ws.clear()
+
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+    rows, fmt_marks = render_rows(blocks, now_str, source_dates)
 
     # Записываем всё
     ws.update(values=rows, range_name="A1")
@@ -204,7 +239,7 @@ def main():
     try:
         ws_s = sh.worksheet("НАСТРОЙКИ")
         ws_s.update(values=[[
-            "Юнит-сводка рассчитана", "—", now_str, "✅ Свежая"
+            "Юнит-сводка рассчитана", "—", now_str, "Рассчитано; полнота данных не подтверждена"
         ]], range_name="E8:H8")
     except Exception as e:
         print(f"[!] Не удалось обновить НАСТРОЙКИ: {e}")
