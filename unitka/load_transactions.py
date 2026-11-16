@@ -138,10 +138,17 @@ def load_payouts(client, date_from, date_to):
                         continue
 
                     cur.execute("""
-                        INSERT OR REPLACE INTO balance_periods
+                        INSERT INTO balance_periods
                         (period_begin, period_end, orders_amount, returns_amount,
                          commission_amount, services_amount, delivery_amount, raw_json)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(period_begin, period_end) DO UPDATE SET
+                            orders_amount=excluded.orders_amount,
+                            returns_amount=excluded.returns_amount,
+                            commission_amount=excluded.commission_amount,
+                            services_amount=excluded.services_amount,
+                            delivery_amount=excluded.delivery_amount,
+                            raw_json=excluded.raw_json
                     """, (pb, pe, cf.get('orders_amount'), cf.get('returns_amount'),
                           cf.get('commission_amount'), cf.get('services_amount'),
                           cf.get('item_delivery_and_return_amount'),
@@ -170,9 +177,14 @@ def load_payouts(client, date_from, date_to):
                     total_pay = sum(abs(float(p.get('payment', 0) or 0)) for p in payments if isinstance(p, dict))
 
                     cur.execute("""
-                        INSERT OR REPLACE INTO balance_periods
+                        INSERT INTO balance_periods
                         (period_begin, period_end, begin_balance, end_balance, payments_total, raw_json)
                         VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(period_begin, period_end) DO UPDATE SET
+                            begin_balance=excluded.begin_balance,
+                            end_balance=excluded.end_balance,
+                            payments_total=excluded.payments_total,
+                            raw_json=excluded.raw_json
                     """, (pb, pe, begin_bal, end_bal, total_pay, json.dumps(detail, ensure_ascii=False)))
 
                     for idx, p in enumerate(payments):
