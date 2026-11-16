@@ -24,8 +24,8 @@ import sqlite3
 import subprocess
 from datetime import datetime
 
-DB_PATH = "ozon.db"
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(_APP_DIR, "ozon.db")
 _ROOT_DIR = os.path.dirname(_APP_DIR)
 DOWNLOADS_DIR = os.path.join(_ROOT_DIR, "downloads")
 PY = sys.executable
@@ -54,7 +54,7 @@ def list_new_files():
 
 def run(cmd, stop_on_error=True):
     print(f"\n>>> {' '.join(cmd)}")
-    r = subprocess.run(cmd)
+    r = subprocess.run(cmd, cwd=_APP_DIR)
     if r.returncode != 0 and stop_on_error:
         print(f"\n[ERROR] команда вернула код {r.returncode}")
         sys.exit(r.returncode)
@@ -80,17 +80,17 @@ def main():
         for f in new_files:
             fname = os.path.basename(f)
             print(f"\n    --- {fname} ---")
-            run([PY, "parse_xlsx.py", f"--file={fname}"], stop_on_error=False)
+            run([PY, "parse_xlsx.py", f"--file={fname}"])
     else:
         print("\n[1] Новых .xlsx нет. Использую текущие данные.")
 
     # 2.5. Отчёт о реализации за прошлый месяц (с защитой от перезаписи)
     print("\n[2.5] Отчёт о реализации за прошлый месяц...")
-    run([PY, "sync_monthly.py"], stop_on_error=False)
+    run([PY, "sync_monthly.py"])
 
     # 3. Финансы из API
     print("\n[3] Синхронизация финансов из Ozon API...")
-    run([PY, "sync_finance.py"], stop_on_error=False)
+    run([PY, "sync_finance.py"])
 
     # 3.5. Проверка новых type_id (алерт, не блокирует)
     print("\n[3.5] Проверка новых type_id...")
