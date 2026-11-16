@@ -57,7 +57,7 @@ def build_period(conn, cur, offer_map, date_from, date_to):
             "sku": sku, "revenue": revenue, "cogs": cogs, "exp": exp,
             "profit": profit, "min_price": None,
             "status": "Убыточный" if profit < 0 else ("Прибыльный" if profit > 0 else "Ноль"),
-            "margin": profit / revenue * 100 if revenue != 0 else 0,
+            "margin": profit / revenue * 100 if revenue > 0 else None,
         })
         for key, value in (("revenue", revenue), ("cogs", cogs), ("exp", exp), ("profit", profit)):
             totals[key] += value
@@ -103,6 +103,10 @@ def _quality_note(block):
     return "Признак оценки себестоимости недоступен."
 
 
+def _display_margin(value):
+    return "н/д" if value is None else round(value, 1)
+
+
 def render_rows(blocks, now_str, source_dates):
     """Build cell values and formatting markers without external access."""
     rows = [[f"ЮНИТ-СВОДКА — обновлено {now_str}"]]
@@ -111,6 +115,7 @@ def render_rows(blocks, now_str, source_dates):
     for source, latest in source_dates.items():
         rows.append([source, latest or "нет записей"])
     rows.append(["Прибыль — валовая по ядру; не чистая после всех налогов и внешних расходов."])
+    rows.append(["Маржа не рассчитывается при выручке ≤ 0; отображается н/д."])
     rows.append([])
 
     # --- ВЕРХНИЙ БЛОК: КРАТКАЯ СВОДКА ---
@@ -120,7 +125,7 @@ def render_rows(blocks, now_str, source_dates):
     for block in blocks:
         t = block['totals']
         items = block['items']
-        margin_pct = (t['profit'] / t['revenue'] * 100) if t['revenue'] else 0
+        margin_pct = (t['profit'] / t['revenue'] * 100) if t['revenue'] > 0 else None
         n_neg = sum(1 for i in items if i['profit'] < 0)
         
         rows.append([
@@ -128,7 +133,7 @@ def render_rows(blocks, now_str, source_dates):
             len(items), n_neg,
             round(t['revenue'], 2), round(t['cogs'], 2),
             round(t['exp'], 2), round(t['profit'], 2),
-            round(margin_pct, 1)
+            _display_margin(margin_pct)
         ])
         fmt_marks.append((len(rows) - 1, 'totals_row'))
     
@@ -139,7 +144,7 @@ def render_rows(blocks, now_str, source_dates):
     for block in blocks:
         t = block['totals']
         items = block['items']
-        margin_pct = (t['profit'] / t['revenue'] * 100) if t['revenue'] else 0
+        margin_pct = (t['profit'] / t['revenue'] * 100) if t['revenue'] > 0 else None
         n_neg = sum(1 for i in items if i['profit'] < 0)
 
         rows.append([f"=== {block['title']} ==="])
@@ -157,7 +162,7 @@ def render_rows(blocks, now_str, source_dates):
                     it['offer_id'] or "", it['sku'],
                     round(it['revenue'], 2), round(it['cogs'], 2),
                     round(it['exp'], 2), round(it['profit'], 2),
-                    "", round(it['margin'], 1),
+                    "", _display_margin(it['margin']),
                     it['status'],
                 ])
         else:
