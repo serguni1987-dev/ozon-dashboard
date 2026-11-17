@@ -1,4 +1,4 @@
-﻿import json
+import json
 import time
 import urllib.request
 import urllib.error
@@ -52,11 +52,29 @@ class OzonClient:
         payload = {"prices": prices_list}
         return self._post("/v1/product/import/prices", payload)
     def accrual_by_day_all(self, date: str) -> list:
+        """Return a validated complete day; never disguise a broken page as empty."""
         out, last_id = [], ""
-        while True:
+        seen = set()
+        for _ in range(200):
             data = self.accrual_by_day(date, last_id)
-            out.extend(data.get("accruals") or [])
-            last_id = data.get("last_id") or ""
-            if not last_id:
-                break
-        return out
+            if not isinstance(data, dict) or not isinstance(data.get("accruals"), list):
+                raise OzonError("Invalid accrual page")
+            rows = data["accruals"]
+            if any(not isinstance(row, dict) for row in rows):
+                raise OzonError("Invalid accrual row")
+            raw_cursor = data.get("last_id")
+            if raw_cursor is not None and not isinstance(raw_cursor, (str, int)):
+                raise OzonError("Invalid accrual cursor")
+            cursor = str(raw_cursor or "")
+            if not rows:
+                if cursor:
+                    raise OzonError("Empty accrual page with continuation")
+                return out
+            out.extend(rows)
+            if not cursor:
+                return out
+            if cursor == last_id or cursor in seen:
+                raise OzonError("Repeated accrual cursor")
+            seen.add(cursor)
+            last_id = cursor
+        raise OzonError("Accrual pagination limit exceeded")

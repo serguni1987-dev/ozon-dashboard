@@ -1,4 +1,4 @@
-﻿"""Загрузка дневной реализации из /v1/finance/accrual/by-day."""
+"""Загрузка дневной реализации из /v1/finance/accrual/by-day."""
 import argparse
 import json
 import re
@@ -77,7 +77,44 @@ def _posting_number(acc):
     return acc.get("unit_number") or posting.get("posting_number")
 
 
+def _validate_daily_accrual(day, acc):
+    if not isinstance(acc, dict):
+        raise ValueError("Accrual must be an object")
+    ident = acc.get("accrual_id")
+    if isinstance(ident, bool) or not isinstance(ident, (int, str)) or not str(ident).isdigit() or int(ident) <= 0:
+        raise ValueError("Missing or invalid accrual_id")
+    if acc.get("date") != day:
+        raise ValueError("Accrual date differs from requested day")
+    # Reject values that cannot be represented as ordinary JSON before writing.
+    json.dumps(acc, ensure_ascii=False, allow_nan=False)
+
+
 def process_accrual(con, day, acc, now_iso):
+    """Replace one operation's derived rows, including NULL posting keys.
+
+    Caller owns the transaction; no commit is performed here.
+    """
+    _validate_daily_accrual(day, acc)
+    started = not con.in_transaction
+    if started:
+        con.execute("BEGIN")
+    con.execute("SAVEPOINT daily_accrual_write")
+    try:
+        for table in ("realization_daily", "accrual_sku_daily", "accrual_non_item_daily"):
+            con.execute(f"DELETE FROM {table} WHERE date=? AND accrual_id=?",
+                        (day, acc["accrual_id"]))
+        result = _process_accrual_rows(con, day, acc, now_iso)
+        con.execute("RELEASE daily_accrual_write")
+        return result
+    except Exception:
+        con.execute("ROLLBACK TO daily_accrual_write")
+        con.execute("RELEASE daily_accrual_write")
+        if started:
+            con.rollback()
+        raise
+
+
+def _process_accrual_rows(con, day, acc, now_iso):
     n_real = n_sku = n_non = 0
     accrual_id = acc.get("accrual_id")
     posting_number = _posting_number(acc)
@@ -171,13 +208,30 @@ def process_accrual(con, day, acc, now_iso):
 
 
 def load_day(client, con, day, force=False):
+    """Publish a complete day atomically, preserving a caller-owned transaction."""
     now_iso = datetime.now().isoformat(timespec="seconds")
-    if not force:
-        row = con.execute("SELECT status FROM load_log WHERE date=?", (day,)).fetchone()
-        if row and row["status"] == "ok":
-            return {"date": day, "skipped": True}
+    active = False
     try:
+        if datetime.strptime(day, "%Y-%m-%d").date().isoformat() != day:
+            raise ValueError("Invalid day")
+        if not force:
+            row = con.execute("SELECT status FROM load_log WHERE date=?", (day,)).fetchone()
+            if row and row[0] == "ok":
+                return {"date": day, "skipped": True}
         accruals = client.accrual_by_day_all(day)
+        if not isinstance(accruals, list):
+            raise ValueError("Expected a complete list of accruals")
+        seen = set()
+        for acc in accruals:
+            _validate_daily_accrual(day, acc)
+            ident = str(int(acc["accrual_id"]))
+            if ident in seen:
+                raise ValueError("Duplicate accrual_id in daily response")
+            seen.add(ident)
+        con.execute("SAVEPOINT daily_load_write")
+        active = True
+        for table in ("realization_daily", "accrual_sku_daily", "accrual_non_item_daily"):
+            con.execute(f"DELETE FROM {table} WHERE date=?", (day,))
         n_real = n_sku = n_non = 0
         for acc in accruals:
             r, s, n = process_accrual(con, day, acc, now_iso)
@@ -187,17 +241,28 @@ def load_day(client, con, day, force=False):
             (date, status, n_accruals, n_rows, error, fetched_at)
             VALUES (?, 'ok', ?, ?, NULL, ?)
         """, (day, len(accruals), n_real, now_iso))
-        con.commit()
+        con.execute("RELEASE daily_load_write")
+        active = False
         return {"date": day, "accruals": len(accruals),
                 "real_rows": n_real, "sku_fees": n_sku, "non_item": n_non}
-    except Exception as e:
-        con.execute("""
-            INSERT OR REPLACE INTO load_log
-            (date, status, n_accruals, n_rows, error, fetched_at)
-            VALUES (?, 'error', 0, 0, ?, ?)
-        """, (day, str(e), now_iso))
-        con.commit()
-        return {"date": day, "error": str(e)}
+    except Exception as exc:
+        if active:
+            con.execute("ROLLBACK TO daily_load_write")
+            con.execute("RELEASE daily_load_write")
+        # Log only after rolling back data. Never commit a caller's unrelated writes.
+        con.execute("SAVEPOINT daily_load_error")
+        try:
+            con.execute("""
+                INSERT OR REPLACE INTO load_log
+                (date, status, n_accruals, n_rows, error, fetched_at)
+                VALUES (?, 'error', 0, 0, ?, ?)
+            """, (day, str(exc), now_iso))
+            con.execute("RELEASE daily_load_error")
+        except Exception:
+            con.execute("ROLLBACK TO daily_load_error")
+            con.execute("RELEASE daily_load_error")
+            raise
+        return {"date": day, "error": str(exc)}
 
 
 def main():
@@ -219,7 +284,10 @@ def main():
     print(f"Диапазон: {d1} .. {d2}")
     for d in daterange(d1, d2):
         s = d.strftime("%Y-%m-%d")
-        print(f"  {s}: {load_day(client, con, s, force=args.force)}")
+        result = load_day(client, con, s, force=args.force)
+        print(f"  {s}: {result}")
+        if "error" in result:
+            raise RuntimeError(f"Daily realization failed for {s}: {result['error']}")
 
 
 if __name__ == "__main__":
