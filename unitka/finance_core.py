@@ -60,32 +60,21 @@ def _month_bounds(date_from: str, date_to: str):
 
 
 def _income_commission(cur, date_from: str, date_to: str):
-    """Валовые доходы и комиссия Ozon: закрытые месяцы из monthly_reports, остальное из accruals."""
-    rng = (date_from, date_to)
-    income_acc_sql = """
-        SELECT COALESCE(SUM(COALESCE(sale_price,0) + COALESCE(bonus,0) + COALESCE(coinvestment,0)), 0)
-        FROM accruals WHERE date >= ? AND date < ?"""
-    comm_acc_sql = """
-        SELECT COALESCE(SUM(COALESCE(sale_commission,0)), 0)
-        FROM accruals WHERE date >= ? AND date < ?"""
-
-    income = _one(cur, income_acc_sql, rng)
-    commission = abs(_one(cur, comm_acc_sql, rng))
-
-    try:
+    """Closed-month headers, otherwise lossless item detail from accrual JSON."""
+    from .accrual_detail import iter_accrual_products
+    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='monthly_reports'")
+    reports = {}
+    if cur.fetchone():
         cur.execute("SELECT month, sale_price_sum + bonus_sum + coinvestment_sum, gross_commission_sum FROM monthly_reports")
         reports = {r[0]: (float(r[1] or 0), float(r[2] or 0)) for r in cur.fetchall()}
-    except Exception:
-        return income, commission
-
-    for month, start, end in _month_bounds(date_from, date_to):
-        if month not in reports:
+    closed = {m for m, _, _ in _month_bounds(date_from, date_to) if m in reports}
+    income = sum(reports[m][0] for m in closed)
+    commission = sum(abs(reports[m][1]) for m in closed)
+    for row in iter_accrual_products(cur, date_from, date_to):
+        if row["date"][:7] in closed:
             continue
-        # заменяем месяц из accruals на месяц из отчёта о реализации
-        income -= _one(cur, income_acc_sql, (start, end))
-        commission -= abs(_one(cur, comm_acc_sql, (start, end)))
-        income += reports[month][0]
-        commission += abs(reports[month][1])
+        income += row["sale_price"] + row["bonus"] + row["coinvestment"]
+        commission -= row["sale_commission"]
     return income, commission
 
 
@@ -95,8 +84,7 @@ def ozon_pnl(cur, date_from: str, date_to: str) -> dict:
 
     # Доходы и комиссия: для закрытых месяцев — из отчёта о реализации (monthly_reports,
     # совпадает с ЛК и Точкой до копейки), для открытых — из начислений accruals.
-    # В accruals за янв/апр/авг доходы ниже отчёта о реализации на 37 236 ₽ (часть
-    # начислений не попала в выгрузку), поэтому отчёт о реализации — приоритетный источник.
+    # Partial months read every product from raw_json; closed reports remain authoritative.
     income, commission = _income_commission(cur, date_from, date_to)
 
     services = abs(_one(cur, """
@@ -130,24 +118,18 @@ def ozon_pnl(cur, date_from: str, date_to: str) -> dict:
             LEFT JOIN ({_COST_LATEST}) c ON m.sku = c.sku
             WHERE m.month = ?""", (month,))
 
-    # Открытые месяцы (ещё нет отчёта о реализации): оценка по начислениям accruals.
-    # Строка POSTING с ценой > 0 = 1 проданная штука, с ценой < 0 = 1 возврат
-    # (проверено на сен и окт 2026: 31/1 и 14/1 — совпадает с отчётом о реализации).
-    # realization_daily здесь НЕЛЬЗЯ использовать: в ней по строке на каждое начисление
-    # (включая услуги с quantity = 1), штуки завышаются в 2–4 раза.
+    # Open/partial months use all products and their actual quantity.
+    from .accrual_detail import iter_accrual_products, sku_key
+    cur.execute(_COST_LATEST)
+    daily_costs = {sku_key(sku): float(cost or 0) for sku, cost in cur.fetchall()}
     cogs_daily = 0.0
-    cogs_estimated = False
     cur.execute("SELECT DISTINCT substr(date,1,7) FROM accruals WHERE date >= ? AND date < ?", rng)
-    for (month,) in cur.fetchall():
-        if month in closed_months:
+    cogs_estimated = any(row[0] not in closed_months for row in cur.fetchall())
+    for row in iter_accrual_products(cur, date_from, date_to):
+        if row["date"][:7] in closed_months or row["accrued_category"] != "POSTING":
             continue
-        cogs_estimated = True
-        cogs_daily += _one(cur, f"""
-            SELECT COALESCE(SUM(CASE WHEN a.sale_price > 0 THEN c.cost_price
-                                     WHEN a.sale_price < 0 THEN -c.cost_price ELSE 0 END), 0)
-            FROM accruals a LEFT JOIN ({_COST_LATEST}) c ON a.sku = c.sku
-            WHERE a.accrued_category = 'POSTING'
-              AND substr(a.date,1,7) = ? AND a.date >= ? AND a.date < ?""", (month, date_from, date_to))
+        sign = 1 if row["sale_price"] > 0 else -1 if row["sale_price"] < 0 else 0
+        cogs_daily += sign * row["quantity"] * daily_costs.get(row["sku"], 0.0)
 
     cogs = cogs_monthly + cogs_daily
     gross_profit = net_from_ozon - cogs

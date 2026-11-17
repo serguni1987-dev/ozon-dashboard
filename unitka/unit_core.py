@@ -9,7 +9,7 @@
 
 Источники (только чтение БД):
     штуки, доходы, комиссия   закрытые месяцы — monthly_realization_rows (отчёт о реализации),
-                              открытый месяц — accruals (строка POSTING с ценой = 1 шт)
+                              открытый месяц — все товары accruals.raw_json с фактическим quantity
     услуги по SKU             accruals_services со SKU (логистика, эквайринг, возвраты …)
     общие расходы Ozon        всё остальное, что удержал Ozon (реклама, подписки, штрафы,
                               баллы за отзывы) — распределяются по SKU пропорционально доходу
@@ -112,21 +112,20 @@ def sku_economics(cur, date_from: str, date_to: str) -> dict:
             s["income"] += sum(_f(dc.get(k)) for k in money_keys) - sum(_f(rc.get(k)) for k in money_keys)
             s["commission"] += _f(dc.get("standard_fee")) - _f(rc.get("standard_fee"))
 
-    # --- 2. Остальные дни периода: начисления accruals (строка POSTING с ценой = 1 шт) ---
-    not_closed = ("AND substr(date,1,7) NOT IN (%s)" % ",".join("?" * len(closed))) if closed else ""
-    cur.execute(f"""
-        SELECT sku, sale_price, bonus, coinvestment, sale_commission
-        FROM accruals
-        WHERE accrued_category = 'POSTING' AND COALESCE(sale_price, 0) != 0
-          AND date >= ? AND date < ? {not_closed}""", (date_from, date_to, *closed))
-    for sku, price, bonus, coinv, comm in cur.fetchall():
-        s = get(sku)
-        if _f(price) > 0:
-            s["delivered"] += 1
-        else:
-            s["returned"] += 1
-        s["income"] += _f(price) + _f(bonus) + _f(coinv)
-        s["commission"] += -_f(comm)          # в accruals комиссия со знаком минус, у возврата — плюс
+    # --- 2. Open/partial months: every product, actual quantity ---
+    from .accrual_detail import iter_accrual_products
+    for row in iter_accrual_products(cur, date_from, date_to):
+        if row["date"][:7] in closed or row["accrued_category"] != "POSTING":
+            continue
+        if not row["sale_price"] and not row["bonus"] and not row["coinvestment"] and not row["sale_commission"]:
+            continue
+        s = get(row["sku"])
+        if row["sale_price"] > 0:
+            s["delivered"] += row["quantity"]
+        elif row["sale_price"] < 0:
+            s["returned"] += row["quantity"]
+        s["income"] += row["sale_price"] + row["bonus"] + row["coinvestment"]
+        s["commission"] -= row["sale_commission"]
 
     # --- 3. Услуги Ozon, привязанные к SKU ---
     cur.execute("""
