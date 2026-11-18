@@ -13,7 +13,14 @@ def step(name, func, *args, **kwargs):
     logger.info(f"ШАГ: {name}")
     logger.info("=" * 60)
     try:
-        func(*args, **kwargs)
+        result = func(*args, **kwargs)
+        if result is False or (
+            isinstance(result, dict)
+            and str(result.get('status', '')).strip().upper()
+            in {'ERROR', 'FAIL', 'FAILED', 'PARTIAL', 'INCOMPLETE', 'SKIPPED'}
+        ):
+            logger.error(f"[FAIL] {name}: step reported an unsuccessful result")
+            return False
         logger.info(f"[OK] {name}")
         return True
     except Exception as e:
@@ -42,19 +49,26 @@ def main():
 
     results = []
 
+    def required(label, name, func, *call_args, **call_kwargs):
+        ok = step(name, func, *call_args, **call_kwargs)
+        results.append((label, ok))
+        if not ok:
+            logger.error("Pipeline stopped; dependent stages were not started")
+            raise SystemExit(1)
+
     if not args.skip_fetch:
-        results.append(('1. Загрузка транзакций', step('load_transactions', load_transactions.main, date_from, date_to)))
-        results.append(('2. Загрузка остатков', step('load_stocks', load_stocks.load_stocks)))
+        required('1. Загрузка транзакций', 'load_transactions', load_transactions.main, date_from, date_to)
+        required('2. Загрузка остатков', 'load_stocks', load_stocks.load_stocks)
     else:
         logger.info("[SKIP] Загрузка данных пропущена (--skip-fetch)")
 
-    results.append(('3. Дебиторка / Выплаты', step('calc_receivables', calc_receivables.main, date_from, date_to, False)))
-    results.append(('4. Баланс', step('calc_balance', calc_balance.main)))
-    results.append(('5. Налоги', step('calc_taxes', calc_taxes.main)))
-    results.append(('6. ДДС', step('calc_cashflow', calc_cashflow.main)))
-    results.append(('7. Оборотный капитал / ROI', step('calc_working_capital', calc_working_capital.main)))
-    results.append(('8. Деньги в товаре', step('calc_money_in_goods', calc_money_in_goods.main)))
-    results.append(('9. Дашборд решений', step('calc_dashboard', calc_dashboard.main)))
+    required('3. Дебиторка / Выплаты', 'calc_receivables', calc_receivables.main, date_from, date_to, False)
+    required('4. Баланс', 'calc_balance', calc_balance.main)
+    required('5. Налоги', 'calc_taxes', calc_taxes.main)
+    required('6. ДДС', 'calc_cashflow', calc_cashflow.main)
+    required('7. Оборотный капитал / ROI', 'calc_working_capital', calc_working_capital.main)
+    required('8. Деньги в товаре', 'calc_money_in_goods', calc_money_in_goods.main)
+    required('9. Дашборд решений', 'calc_dashboard', calc_dashboard.main)
 
     logger.info("")
     logger.info("=" * 60)

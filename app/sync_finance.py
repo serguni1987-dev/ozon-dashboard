@@ -25,7 +25,7 @@ H = {
     "Content-Type": "application/json",
 }
 BASE = "https://api-seller.ozon.ru"
-DB = "ozon.db"
+DB = os.path.join(os.getenv("PULT_HOME") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app", "ozon.db")
 
 START_DEFAULT = "2026-09-01"
 END = datetime.now().strftime("%Y-%m-%d")
@@ -109,18 +109,28 @@ def get_start_date(cur):
     return (datetime.strptime(max_date, "%Y-%m-%d") - timedelta(days=2)).strftime("%Y-%m-%d")
 
 
-def save_accrual(cur, acc, types):
+def save_accrual(cur,acc,types):
+    from pathlib import Path
+    root=str(Path(__file__).resolve().parent.parent)
+    if root not in sys.path:sys.path.insert(0,root)
     from unitka.accrual_detail import save_accrual_record
-    return save_accrual_record(cur, acc, types)
+    return save_accrual_record(cur,acc,types)
 
 
 def main():
+    from pathlib import Path
+    root=str(Path(__file__).resolve().parent.parent)
+    if root not in sys.path:sys.path.insert(0,root)
+    from unitka.finance_ingestion import validated_day
+    from unitka.ingestion_safety import span
     args = parse_args()
     print("=" * 80)
     print("СИНХРОНИЗАЦИЯ ФИНАНСОВ ИЗ OZON API")
     print("=" * 80)
 
-    con = sqlite3.connect(DB)
+    if not Path(DB).is_file():
+        raise FileNotFoundError("Configured database does not exist")
+    con = sqlite3.connect(Path(DB).resolve().as_uri()+"?mode=rw", uri=True)
     try:
         with con:
             cur = con.cursor()
@@ -134,9 +144,7 @@ def main():
 
             print(f"\n[1] Период синхронизации: {start} — {end}")
 
-            if start > end:
-                print("  Данные уже актуальны.")
-                return
+            span(start,end)
 
             print("\n[2] Справочник типов начислений...")
             types = get_types()
@@ -153,6 +161,7 @@ def main():
             while d <= end_dt:
                 ds = d.strftime("%Y-%m-%d")
                 rows = fetch_day(ds)
+                validated_day(rows,ds)
 
                 if rows:
                     days_with_data += 1

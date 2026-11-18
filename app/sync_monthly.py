@@ -1,4 +1,4 @@
-﻿"""
+"""
 sync_monthly.py - отчёт о реализации Ozon за предыдущий месяц.
 Метод: POST /v2/finance/realization
 """
@@ -107,6 +107,8 @@ def main():
     args, _ = parser.parse_known_args()
 
     if args.month:
+        if datetime.strptime(args.month,"%Y-%m").strftime("%Y-%m") != args.month:
+            raise ValueError("Expected YYYY-MM")
         parts = args.month.split("-")
         year = int(parts[0])
         month = int(parts[1])
@@ -135,6 +137,11 @@ def main():
     rows = result.get("rows")
     if not isinstance(header, dict) or not isinstance(rows, list):
         raise RuntimeError("Invalid monthly header or rows")
+    import calendar
+    expected_start=f"{year:04d}-{month:02d}-01"
+    expected_stop=f"{year:04d}-{month:02d}-{calendar.monthrange(year,month)[1]:02d}"
+    if str(header.get("start_date") or "")[:10] != expected_start or str(header.get("stop_date") or "")[:10] != expected_stop:
+        raise RuntimeError("Monthly report period differs from requested month or is missing")
     for row in rows:
         if not isinstance(row, dict):
             raise RuntimeError("Invalid monthly row")

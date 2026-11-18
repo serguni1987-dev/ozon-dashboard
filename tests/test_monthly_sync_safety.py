@@ -41,7 +41,7 @@ class MonthlySyncSafetyTests(unittest.TestCase):
 
     def invoke(self, rows=None, data=None, status=200, force=False):
         response = Mock(status_code=status)
-        response.json.return_value = data if data is not None else {'result': {'header': {}, 'rows': rows if rows is not None else [self.row()]}}
+        response.json.return_value = data if data is not None else {'result': {'header': {'start_date':'2026-10-01','stop_date':'2026-10-31'}, 'rows': rows if rows is not None else [self.row()]}}
         self.request.post.return_value = response
         argv = ['sync_monthly.py', '--month', '2026-10'] + (['--force'] if force else [])
         with patch('sys.argv', argv), patch('builtins.print'):

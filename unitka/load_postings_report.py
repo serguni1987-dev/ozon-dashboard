@@ -1,4 +1,4 @@
-﻿"""load_postings_report.py — выгрузка отчёта SELLER_POSTINGS из Ozon.
+"""load_postings_report.py — выгрузка отчёта SELLER_POSTINGS из Ozon.
 
 Ozon отдаёт отчёт в формате CSV (BOM + ; разделитель), не XLSX.
 """
@@ -92,6 +92,16 @@ def download(url):
 
 
 def parse(content):
+    from .ingestion_safety import IngestionError
+    header,rows=_parse_unvalidated_report(content);names=[str(x).strip() for x in header if x]
+    if len(names)!=len(set(names)) or not {'Номер отправления','SKU','Количество','Статус'}.issubset(names):raise IngestionError('Missing/duplicate report headers')
+    if not {'Принят в обработку','Дата отгрузки','Дата доставки'}.intersection(names):raise IngestionError('Missing date header')
+    if not {'Сумма отправления','Оплачено покупателем','Выкуп товара'}.intersection(names):raise IngestionError('Missing money header')
+    if not rows:raise IngestionError('Empty report requires review')
+    return header,rows
+
+
+def _parse_unvalidated_report(content):
     """Универсальный парсер: CSV (BOM / ;) или XLSX (PK)."""
     if content[:2] == b"PK":
         import openpyxl
@@ -123,60 +133,30 @@ def parse(content):
     return header, out
 
 
-def save_rows(rows, date_from, date_to):
-    con = sqlite3.connect(str(config.DB_PATH))
-    cur = con.cursor()
-    cur.execute("DELETE FROM postings_daily WHERE date BETWEEN ? AND ? AND source='xlsx_report'",
-                (date_from, date_to))
-
-    def g(row, *names):
-        for n in names:
-            v = row.get(n)
-            if v not in (None, ""):
-                return v
+def save_rows(rows,date_from,date_to):
+    from pathlib import Path
+    from contextlib import closing
+    from .ingestion_safety import IngestionError,identifier,integer,number,day,span,objects,atomic
+    span(date_from,date_to);out=[];seen=set()
+    if not rows:raise IngestionError('Empty report requires review')
+    def get(row,*names):
+        for name in names:
+            if row.get(name) not in (None,''):return row[name]
         return None
-
-    out = []
-    skipped_no_date = 0
-    status_counter = {}
-    for row in rows:
-        d = (_parse_date(g(row, "Принят в обработку"))
-             or _parse_date(g(row, "Дата отгрузки"))
-             or _parse_date(g(row, "Дата доставки")))
-        if not d:
-            skipped_no_date += 1
-            continue
-
-        status = str(g(row, "Статус") or "").strip()
-        status_counter[status] = status_counter.get(status, 0) + 1
-        st = status.lower()
-
-        date_cancel = _parse_date(g(row, "Дата отмены"))
-        is_cancelled = 1 if (date_cancel or "отмен" in st or "cancel" in st) else 0
-        is_returned = 1 if ("возврат" in st or "return" in st) else 0
-
-        pn = str(g(row, "Номер отправления") or "").strip()
-        sku = str(g(row, "SKU") or "").strip()
-        qty = _f(g(row, "Количество")) or 1
-        price = _f(g(row, "Сумма отправления") or g(row, "Оплачено покупателем")
-                   or g(row, "Выкуп товара"))
-
-        out.append((d, pn, sku, int(qty), price, 0.0,
-                    is_cancelled, is_returned, status, "xlsx_report",
-                    json.dumps(row, ensure_ascii=False, default=str)))
-
-    cur.executemany("""
-        INSERT INTO postings_daily
-            (date, posting_number, sku, quantity, price, commission,
-             is_cancelled, is_returned, status, source, raw_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, out)
-    con.commit()
-    logger.info(f"Сохранено {len(out)} строк, пропущено без даты: {skipped_no_date}")
-    logger.info("Уникальные статусы в отчёте:")
-    for s, n in sorted(status_counter.items(), key=lambda x: -x[1]):
-        logger.info(f"  {s!r}: {n}")
-    con.close()
+    for row in objects(rows):
+        stamp=day(_parse_date(get(row,'Принят в обработку')) or _parse_date(get(row,'Дата отгрузки')) or _parse_date(get(row,'Дата доставки')))
+        if not date_from<=stamp<=date_to:raise IngestionError('Report row outside requested interval')
+        pn=identifier(get(row,'Номер отправления'));sku=str(integer(get(row,'SKU'),minimum=1));key=(stamp,pn,sku)
+        if key in seen:raise IngestionError('Duplicate report row')
+        seen.add(key);qty=integer(get(row,'Количество'),minimum=1);price=number(get(row,'Сумма отправления','Оплачено покупателем','Выкуп товара'));status=str(get(row,'Статус') or '');lower=status.lower()
+        cancelled=int(bool(_parse_date(get(row,'Дата отмены'))) or 'отмен' in lower or 'cancel' in lower);returned=int('возврат' in lower or 'return' in lower)
+        out.append((stamp,pn,sku,qty,price,None,cancelled,returned,status,'xlsx_report',json.dumps(row,ensure_ascii=False,default=str,allow_nan=False)))
+    path=Path(config.DB_PATH).resolve()
+    if not path.is_file():raise FileNotFoundError('Configured database does not exist')
+    with closing(sqlite3.connect(path.as_uri()+'?mode=rw',uri=True)) as con:
+        with atomic(con):
+            con.execute("DELETE FROM postings_daily WHERE date BETWEEN ? AND ? AND source='xlsx_report'",(date_from,date_to));con.executemany('INSERT INTO postings_daily(date,posting_number,sku,quantity,price,commission,is_cancelled,is_returned,status,source,raw_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)',out)
+    return len(out)
 
 
 def main():

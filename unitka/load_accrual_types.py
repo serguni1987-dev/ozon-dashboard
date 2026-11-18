@@ -1,4 +1,4 @@
-﻿"""Разово: справочник типов начислений в accrual_types."""
+"""Разово: справочник типов начислений в accrual_types."""
 from datetime import datetime
 
 from . import config, db
@@ -6,21 +6,14 @@ from .ozon_client import OzonClient
 
 
 def main():
-    config.check_credentials()
-    client = OzonClient()
-    types = client.accrual_types()
-    now = datetime.now().isoformat(timespec="seconds")
-    con = db.connect()
-    db.init_schema(con)
-    for t in types:
-        con.execute("""INSERT OR REPLACE INTO accrual_types
-                       (id, name, description, fetched_at) VALUES (?, ?, ?, ?)""",
-                    (int(t.get("id") or 0), t.get("name"), t.get("description"), now))
-    con.commit()
-    con.close()
-    print(f"Загружено {len(types)} типов начислений")
-    for t in sorted(types, key=lambda x: x.get("id", 0)):
-        print(f"  {t.get('id'):>5}  {t.get('name')}")
+    from .ingestion_safety import atomic,objects,integer,identifier
+    config.check_credentials();rows=[(integer(t.get('id'),minimum=1),identifier(t.get('name')),t.get('description'),datetime.now().isoformat(timespec='seconds')) for t in objects(OzonClient().accrual_types())]
+    if not rows:raise ValueError('Empty accrual types; previous catalogue preserved')
+    con=db.connect()
+    try:
+        with atomic(con):con.executemany('INSERT OR REPLACE INTO accrual_types(id,name,description,fetched_at) VALUES (?,?,?,?)',rows)
+    finally:con.close()
+    return len(rows)
 
 
 if __name__ == "__main__":

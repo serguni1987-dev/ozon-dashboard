@@ -71,7 +71,7 @@ class SyncFinanceSafetyTests(unittest.TestCase):
                  patch.object(self.mod, "parse_args", return_value={"date_from": "2026-11-14", "date_to": "2026-11-15"}), \
                  patch.object(self.mod, "get_types", return_value={}), \
                  patch.object(self.mod, "save_accrual", side_effect=save), \
-                 patch.object(self.mod, "fetch_day", side_effect=[[{"accrual_id": "1"}], RuntimeError("day failed")]), \
+                 patch.object(self.mod, "fetch_day", side_effect=[[{"accrual_id": "1", "date":"2026-11-14", "total_amount":{"amount":10}}], RuntimeError("day failed")]), \
                  patch("builtins.print"):
                 with self.assertRaisesRegex(RuntimeError, "day failed"):
                     self.mod.main()

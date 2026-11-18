@@ -78,3 +78,15 @@ class OzonClient:
             seen.add(cursor)
             last_id = cursor
         raise OzonError("Accrual pagination limit exceeded")
+
+    def accrual_types(self):
+        from .ingestion_safety import objects,integer,identifier,IngestionError
+        raw=self._post('/v1/finance/accrual/types',{})
+        if not isinstance(raw,dict):raise IngestionError('Invalid accrual type response')
+        rows=objects(raw.get('accrual_types',raw.get('result')));out=[];seen=set()
+        for row in rows:
+            key=integer(row.get('id',row.get('code')),minimum=1)
+            if key in seen:raise IngestionError('Duplicate accrual type')
+            seen.add(key);out.append(dict(row,id=key,name=identifier(row.get('name',row.get('title')))))
+        if not out:raise IngestionError('Empty accrual type catalogue')
+        return out

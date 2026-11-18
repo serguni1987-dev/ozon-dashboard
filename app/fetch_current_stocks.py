@@ -1,4 +1,4 @@
-﻿"""
+"""
 fetch_current_stocks.py — тянет актуальные остатки из Ozon API.
 Сохраняет в таблицу current_stocks в SQLite.
 """
@@ -38,106 +38,29 @@ def init_table(con):
 
 
 def fetch_page(last_id=""):
-    body = {
-        "filter": {"visibility": "ALL"},
-        "cursor": last_id,
-        "limit": 1000,
-    }
-    r = requests.post(URL, headers=H, json=body, timeout=60)
-    if r.status_code != 200:
-        print(f"[{r.status_code}] {r.text[:500]}")
-        return [], ""
-    data = r.json()
-    items = data.get("items") or []
-    last_id_new = data.get("cursor") or ""
-    return items, last_id_new
+    response=requests.post(URL,headers=H,json={'filter':{'visibility':'ALL'},'cursor':last_id,'limit':1000},timeout=60)
+    if response.status_code!=200:raise RuntimeError(f'Stock API HTTP {response.status_code}')
+    data=response.json()
+    if not isinstance(data,dict) or not isinstance(data.get('items'),list):raise RuntimeError('Invalid stock response')
+    return data
 
 
 def main():
-    print("=" * 90)
-    print("ЗАГРУЗКА ОСТАТКОВ ИЗ OZON API")
-    print("=" * 90)
-
-    con = sqlite3.connect(DB)
-    init_table(con)
-    cur = con.cursor()
-
-    # Очистка перед перезагрузкой
-    cur.execute("DELETE FROM current_stocks")
-
-    last_id = ""
-    page = 1
-    total = 0
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    while True:
-        items, cursor = fetch_page(last_id)
-        if not items:
-            break
-        print(f"  страница {page}: {len(items)} SKU")
-
-        for it in items:
-            oid = it.get("offer_id")
-            sku = it.get("product_id") or it.get("sku")
-            if not oid:
-                continue
-
-            stocks = it.get("stocks") or []
-            fbo_present = fbo_reserved = fbs_present = fbs_reserved = 0
-
-            for s in stocks:
-                typ = s.get("type", "").lower()
-                present = s.get("present", 0) or 0
-                reserved = s.get("reserved", 0) or 0
-                if typ == "fbo":
-                    fbo_present = present
-                    fbo_reserved = reserved
-                elif typ == "fbs":
-                    fbs_present = present
-                    fbs_reserved = reserved
-
-            cur.execute("""
-                INSERT OR REPLACE INTO current_stocks
-                (offer_id, sku, fbo_present, fbo_reserved,
-                 fbs_present, fbs_reserved, total_present, total_reserved, fetched_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                oid, sku, fbo_present, fbo_reserved,
-                fbs_present, fbs_reserved,
-                fbo_present + fbs_present, fbo_reserved + fbs_reserved,
-                now,
-            ))
-            total += 1
-
-        last_id = cursor
-        if not last_id:
-            break
-        page += 1
-        if page > 20:
-            break
-
-    con.commit()
-
-    # Статистика
-    n_total = cur.execute("SELECT COUNT(*) FROM current_stocks").fetchone()[0]
-    n_positive = cur.execute("SELECT COUNT(*) FROM current_stocks WHERE total_present > 0").fetchone()[0]
-    n_zero = cur.execute("SELECT COUNT(*) FROM current_stocks WHERE total_present = 0").fetchone()[0]
-
-    total_value = cur.execute("""
-        SELECT SUM(cs.total_present * p.cost_price)
-        FROM current_stocks cs
-        JOIN products p ON p.offer_id = cs.offer_id
-        WHERE p.cost_price > 0
-    """).fetchone()[0] or 0
-
-    print(f"\n  Обновлено:                {total}")
-    print(f"  Всего в current_stocks:   {n_total}")
-    print(f"  С остатком > 0:           {n_positive}")
-    print(f"  С остатком = 0:           {n_zero}")
-    print(f"\n  💰 Заморожено в складе:   {total_value:>14,.0f} ₽")
-
-    con.close()
-    print("\n" + "=" * 90)
+    from pathlib import Path
+    import sys
+    root=str(Path(__file__).resolve().parent.parent)
+    if root not in sys.path:sys.path.insert(0,root)
+    from unitka import config
+    from unitka.stock_ingestion import collect,replace_current
+    global H,URL
+    config.check_credentials();H={'Client-Id':config.OZON_CLIENT_ID,'Api-Key':config.OZON_API_KEY,'Content-Type':'application/json'};URL=config.OZON_BASE_URL.rstrip('/')+'/v4/product/info/stocks'
+    path=Path(config.DB_PATH).resolve()
+    if not path.is_file():raise FileNotFoundError('Configured database does not exist')
+    rows,_=collect(fetch_page);con=sqlite3.connect(path.as_uri()+'?mode=rw',uri=True)
+    try:
+        init_table(con)
+        return replace_current(con,rows,datetime.now().isoformat(timespec='seconds'))
+    finally:con.close()
 
 
 if __name__ == "__main__":

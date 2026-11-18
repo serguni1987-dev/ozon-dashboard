@@ -22,43 +22,22 @@ def init_db():
 
 
 def load_content_ratings():
-    client = OzonClient()
-    conn = connect()
-    cur = conn.cursor()
-
-    cur.execute("SELECT DISTINCT sku FROM postings_daily WHERE sku IS NOT NULL")
-    skus = [str(r[0]) for r in cur.fetchall()]
-    cur.execute("SELECT DISTINCT sku FROM stock_daily WHERE sku IS NOT NULL")
-    for r in cur.fetchall():
-        if str(r[0]) not in skus:
-            skus.append(str(r[0]))
-
-    logger.info("Всего SKU для запроса: %s", len(skus))
-
-    total_loaded = 0
-    for i in range(0, len(skus), 100):
-        chunk = skus[i:i + 100]
-        payload = {"skus": chunk}
-        try:
-            resp = client._post("/v1/product/rating-by-sku", payload)
-            if not resp:
-                continue
-            products = resp.get("products", [])
-            for p in products:
-                sku = str(p.get("sku"))
-                rating = p.get("rating")
-                cur.execute("""
-                    INSERT OR REPLACE INTO sku_content_rating (sku, content_rating, updated_at)
-                    VALUES (?, ?, ?)
-                """, (sku, rating, datetime.now().isoformat()))
-                total_loaded += 1
-            logger.info("Чанк %s: загружено %s рейтингов", i // 100 + 1, len(products))
-        except Exception as e:
-            logger.error("Ошибка чанка %s: %s", i // 100 + 1, e)
-
-    conn.commit()
-    conn.close()
-    logger.info("Всего загружено контент-рейтингов: %s", total_loaded)
+    from .ingestion_safety import objects,identifier,number,atomic,IngestionError
+    client=OzonClient();conn=connect()
+    try:
+        skus=sorted({identifier(r[0]) for r in conn.execute('SELECT sku FROM postings_daily WHERE sku IS NOT NULL UNION SELECT sku FROM stock_daily WHERE sku IS NOT NULL')});rows=[];seen=set();stamp=datetime.now().isoformat()
+        for offset in range(0,len(skus),100):
+            chunk=skus[offset:offset+100];response=client._post('/v1/product/rating-by-sku',{'skus':chunk})
+            if not isinstance(response,dict) or 'products' not in response:raise IngestionError('Invalid rating response')
+            received=set()
+            for product in objects(response['products']):
+                sku=identifier(product.get('sku'));rating=number(product.get('rating'))
+                if sku not in chunk or sku in seen or rating<0:raise IngestionError('Unexpected/duplicate rating')
+                seen.add(sku);received.add(sku);rows.append((sku,rating,stamp))
+            if received!=set(chunk):raise IngestionError('Incomplete rating chunk; previous data preserved')
+        with atomic(conn):conn.executemany('INSERT OR REPLACE INTO sku_content_rating(sku,content_rating,updated_at) VALUES (?,?,?)',rows)
+        return {'status':'OK' if skus else 'SKIPPED','rows':len(rows)}
+    finally:conn.close()
 
 
 if __name__ == "__main__":

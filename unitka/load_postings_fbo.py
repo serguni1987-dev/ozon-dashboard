@@ -1,4 +1,4 @@
-﻿"""Загрузка FBO-отправлений через /v2/posting/fbo/list."""
+"""Загрузка FBO-отправлений через /v2/posting/fbo/list."""
 import argparse, json, logging, sqlite3
 from unitka import config
 from unitka.ozon_client import OzonClient
@@ -17,81 +17,18 @@ def _iso(d, end=False):
     return f"{d}T{t}Z"
 
 
-def fetch_postings(client, date_from, date_to):
-    all_postings, offset = [], 0
-    since, to = _iso(date_from), _iso(date_to, True)
-    logger.info(f"FBO запрос: since={since} to={to}")
-    while True:
-        payload = {
-            "dir": "ASC",
-            "filter": {"since": since, "to": to},
-            "limit": LIMIT,
-            "offset": offset,
-            "with": {"analytics_data": True, "financial_data": True},
-        }
-        data = client._post("/v2/posting/fbo/list", payload)
-        # /v2/posting/fbo/list возвращает result как список напрямую
-        postings = data.get("result") or []
-        all_postings.extend(postings)
-        logger.info(f"offset={offset} получено {len(postings)}")
-        # если меньше лимита — это конец
-        if len(postings) < LIMIT:
-            break
-        offset += LIMIT
-    return all_postings
+def fetch_postings(client,date_from,date_to):
+    from .postings_ingestion import fetch
+    return fetch(client,date_from,date_to,scheme='fbo',limit=LIMIT)
 
 
-def save_postings(postings, date_from, date_to):
-    con = sqlite3.connect(str(config.DB_PATH))
-    cur = con.cursor()
-    cur.execute("DELETE FROM postings_daily WHERE date BETWEEN ? AND ? AND source='api_fbo'",
-                (date_from, date_to))
-    rows = []
-    statuses = {}
-    skipped_no_date = 0
-    for p in postings:
-        status = p.get("status") or ""
-        statuses[status] = statuses.get(status, 0) + 1
-
-        # для FBO берём created_at (дата создания), fallback — in_process_at
-        order_date = (p.get("created_at") or p.get("in_process_at") or "")[:10]
-        if not order_date:
-            skipped_no_date += 1
-            continue
-
-        is_cancelled = 1 if status == "cancelled" else 0
-        is_returned  = 1 if "return" in status.lower() else 0
-
-        fin = p.get("financial_data") or {}
-        commission_total = 0
-        for fp in (fin.get("products") or []):
-            commission_total += float(fp.get("commission_amount") or 0)
-
-        posting_number = p.get("posting_number")
-        for prod in (p.get("products") or []):
-            rows.append((
-                order_date, posting_number,
-                str(prod.get("sku") or ""),
-                int(prod.get("quantity") or 1),
-                float(prod.get("price") or 0),
-                float(commission_total),
-                is_cancelled, is_returned, status, "api_fbo",
-                json.dumps(p, ensure_ascii=False),
-            ))
-
-    cur.executemany("""
-        INSERT INTO postings_daily
-            (date, posting_number, sku, quantity, price, commission,
-             is_cancelled, is_returned, status, source, raw_json)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-    """, rows)
-    con.commit()
-    logger.info(f"Сохранено {len(rows)} строк (source=api_fbo), "
-                f"пропущено без даты: {skipped_no_date}")
-    logger.info("Статусы FBO:")
-    for s, n in sorted(statuses.items(), key=lambda x: -x[1]):
-        logger.info(f"  {s!r}: {n}")
-    con.close()
+def save_postings(postings,date_from,date_to):
+    from pathlib import Path
+    from contextlib import closing
+    from .postings_ingestion import normalize,replace
+    rows=normalize(postings,date_from,date_to,scheme='fbo');path=Path(config.DB_PATH).resolve()
+    if not path.is_file():raise FileNotFoundError('Configured database does not exist')
+    with closing(sqlite3.connect(path.as_uri()+'?mode=rw',uri=True)) as con:return replace(con,rows,date_from,date_to,scheme='fbo')
 
 
 def main():
